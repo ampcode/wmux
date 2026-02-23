@@ -65,7 +65,7 @@ func run(cfg config) error {
 		return fmt.Errorf("ensure ui session: %w", err)
 	}
 
-	hub := wshub.New(policy.Default())
+	hub := wshub.New(policy.Default(), cfg.targetSession)
 	manager := tmuxproc.NewManager(tmuxproc.Config{
 		TmuxBin:       cfg.tmuxBin,
 		TargetSession: cfg.targetSession,
@@ -83,6 +83,7 @@ func run(cfg config) error {
 	defer cancel()
 
 	go manager.Run(ctx)
+	go hub.RequestStateSyncWithRetry()
 
 	handler, err := httpd.NewServer(httpd.Config{
 		StaticDir: cfg.staticDir,
