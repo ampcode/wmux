@@ -22,7 +22,6 @@ import (
 type config struct {
 	listen         string
 	targetSession  string
-	uiSession      string
 	staticDir      string
 	tmuxBin        string
 	restartBackoff time.Duration
@@ -39,17 +38,12 @@ func main() {
 func parseConfig() config {
 	cfg := config{}
 	flag.StringVar(&cfg.listen, "listen", envOr("WMUX_LISTEN", "127.0.0.1:8080"), "HTTP listen address")
-	flag.StringVar(&cfg.targetSession, "target-session", envOr("WMUX_TARGET_SESSION", ""), "tmux target session")
-	flag.StringVar(&cfg.uiSession, "ui-session", envOr("WMUX_UI_SESSION", "webui"), "tmux UI session ensured at startup")
+	flag.StringVar(&cfg.targetSession, "target-session", envOr("WMUX_TARGET_SESSION", "webui"), "tmux session to ensure and serve")
 	flag.StringVar(&cfg.staticDir, "static-dir", envOr("WMUX_STATIC_DIR", ""), "optional static assets directory")
 	flag.StringVar(&cfg.tmuxBin, "tmux-bin", envOr("WMUX_TMUX_BIN", "tmux"), "path to tmux binary")
 	flag.DurationVar(&cfg.restartBackoff, "restart-backoff", durationEnvOr("WMUX_RESTART_BACKOFF", 500*time.Millisecond), "restart backoff base")
 	flag.DurationVar(&cfg.restartMax, "restart-max-backoff", durationEnvOr("WMUX_RESTART_MAX_BACKOFF", 10*time.Second), "restart backoff max")
 	flag.Parse()
-
-	if cfg.targetSession == "" {
-		cfg.targetSession = cfg.uiSession
-	}
 	return cfg
 }
 
@@ -61,8 +55,8 @@ func run(cfg config) error {
 	if err := tmuxproc.CheckTmux(cfg.tmuxBin); err != nil {
 		return err
 	}
-	if err := tmuxproc.EnsureSession(cfg.tmuxBin, cfg.uiSession); err != nil {
-		return fmt.Errorf("ensure ui session: %w", err)
+	if err := tmuxproc.EnsureSession(cfg.tmuxBin, cfg.targetSession); err != nil {
+		return fmt.Errorf("ensure target session: %w", err)
 	}
 
 	hub := wshub.New(policy.Default(), cfg.targetSession)

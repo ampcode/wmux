@@ -21,8 +21,7 @@ Non-goals:
 
 ## Terminology
 
-- **Target session**: the tmux session the web UI attaches to and displays (configured).
-- **UI session**: a named session ensured/created at server startup, not displayed in the UI.
+- **Target session**: the single tmux session wmux ensures, attaches to, and displays.
 
 ---
 
@@ -31,8 +30,7 @@ Non-goals:
 Command-line flags (or env equivalents):
 
 - `--listen` (default `127.0.0.1:8080`)
-- `--target-session <name>` (required; or default to `ui-session`)
-- `--ui-session <name>` (default `webui`)
+- `--target-session <name>` (default `webui`)
 - `--static-dir <path>` (bundle or embed by default)
 - `--tmux-bin <path>` (default `tmux`)
 - `--restart-backoff` (e.g. exponential, max cap)
@@ -43,8 +41,8 @@ Command-line flags (or env equivalents):
 
 1. Ensure tmux server reachable:
    - Execute `tmux -V` (optional sanity check)
-2. Ensure UI session exists:
-   - If missing: `tmux new-session -d -s <ui-session>`
+2. Ensure target session exists:
+   - If missing: `tmux new-session -d -s <target-session>`
 3. Spawn a single long-lived tmux control client for the target session:
    - `tmux -CC attach-session -t <target-session>`
 4. Establish stdout line reader + stdin writer for the tmux control client.
