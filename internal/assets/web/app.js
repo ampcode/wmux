@@ -167,7 +167,7 @@ function createTerminal(initialPaneId) {
 
   const term = new Terminal({
     convertEol: false,
-    fontFamily: "JetBrains Mono, Menlo, monospace",
+    fontFamily: '"JetBrains Mono NF", "JetBrains Mono", Menlo, monospace',
     fontSize: 13,
     scrollback: 10000,
     allowTransparency: true,
