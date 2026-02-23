@@ -33,13 +33,13 @@ Quick flow:
 - Snapshot interactive controls and click a pane link (for example `@e1`):
   - `agent-browser --auto-connect snapshot -i`
   - `agent-browser --auto-connect click @e1`
-- Confirm you are on a pane route (`/t/%NN`) and terminal input exists:
+- Confirm you are on a pane route (`/p/<n>`) and terminal input exists:
   - `agent-browser --auto-connect get url`
   - `agent-browser --auto-connect snapshot -i`
 
 Important behavior:
 - `/` alone is usually not interactive for terminal input because the UI needs a pane target from the URL.
-- Pane routes look like `/t/%13` and are required for terminal interaction.
+- Pane routes look like `/p/0` and are required for terminal interaction.
 
 Minimal interaction assertion:
 - `agent-browser --auto-connect fill @e1 "echo AGENT_BROWSER_OK"`

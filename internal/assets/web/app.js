@@ -1,6 +1,6 @@
 const terminalHostEl = document.getElementById("terminal-host");
 
-const targetToken = parseTargetToken(location.pathname);
+const targetPaneNumber = parseTargetPaneNumber(location.pathname);
 
 const state = {
   ws: null,
@@ -14,19 +14,12 @@ const state = {
 connect();
 window.addEventListener("resize", schedulePaneResize);
 
-function parseTargetToken(pathname) {
-  const m = pathname.match(/^\/t\/(.+)$/);
+function parseTargetPaneNumber(pathname) {
+  const m = pathname.match(/^\/p\/(\d+)$/);
   if (!m) return "";
-  const raw = m[1];
-  if (/^%\d+$/.test(raw)) {
-    // Pane IDs are tmux tokens like %11 and should not be URI-decoded.
-    return raw;
-  }
-  try {
-    return decodeURIComponent(raw);
-  } catch {
-    return raw;
-  }
+  const num = Number(m[1]);
+  if (!Number.isInteger(num) || num < 0) return "";
+  return num;
 }
 
 function connect() {
@@ -112,7 +105,10 @@ function handleServerMessage(msg) {
 function applyState(snapshot) {
   state.panes.clear();
   for (const p of snapshot?.panes || []) {
-    state.panes.set(p.id, {
+    const paneNumber = Number(p.pane_index);
+    if (!Number.isInteger(paneNumber) || paneNumber < 0) continue;
+    state.panes.set(paneNumber, {
+      pane: paneNumber,
       id: p.id,
       name: p.name || p.title || "",
       width: Number(p.width || 0),
@@ -121,9 +117,9 @@ function applyState(snapshot) {
     });
   }
 
-  const resolved = resolveTargetPane(targetToken, state.panes);
+  const resolved = resolveTargetPane(targetPaneNumber, state.panes);
   if (!resolved) {
-    console.warn(`pane not found: ${targetToken || "(missing in URL)"}`);
+    console.warn(`pane not found: ${targetPaneNumber === "" ? "(missing in URL)" : targetPaneNumber}`);
     return;
   }
 
@@ -140,17 +136,9 @@ function applyState(snapshot) {
   }
 }
 
-function resolveTargetPane(token, panes) {
-  if (!token) return null;
-  if (panes.has(token)) return panes.get(token);
-
-  const lower = token.toLowerCase();
-  for (const pane of panes.values()) {
-    if ((pane.name || "").toLowerCase() === lower) {
-      return pane;
-    }
-  }
-  return null;
+function resolveTargetPane(paneNumber, panes) {
+  if (!Number.isInteger(paneNumber)) return null;
+  return panes.get(paneNumber) || null;
 }
 
 function createTerminal(initialPaneId) {

@@ -2,7 +2,7 @@
 
 `wmux` exposes a tmux session in the browser.
 
-It runs a tmux control-mode client (`tmux -CC`), serves a small web UI, and lets you open a specific pane route like `/t/%13`.
+It runs a tmux control-mode client (`tmux -CC`), serves a small web UI, and lets you open a specific pane route like `/p/0`.
 
 ## Prerequisites
 
@@ -28,7 +28,7 @@ By default it listens on `127.0.0.1:8080` and targets session `webui`.
 3. Open pane links in your browser:
 
 - `http://127.0.0.1:8080/api/state.html` to list panes
-- Click a pane link (for example `/t/%13`) to open that pane terminal
+- Click a pane link (for example `/p/0`) to open that pane terminal
 
 ## Common Run Modes
 

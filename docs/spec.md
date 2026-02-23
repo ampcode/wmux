@@ -9,13 +9,13 @@ This document describes what the codebase currently implements.
 Current UI scope:
 
 - Single full-screen xterm.js terminal per browser page.
-- Page targets exactly one pane (from URL path `/t/<token>`).
+- Page targets exactly one pane (from URL path `/p/<n>`).
 - Multiple web clients are supported concurrently.
 
 ## Terminology
 
 - **Target session**: the one tmux session `wmux` ensures at startup and attaches to.
-- **Pane token**: URL token after `/t/`, usually a tmux pane id like `%13`.
+- **Pane number**: numeric pane index from tmux (`#{pane_index}`), used in URLs and HTTP API responses.
 
 ## Configuration
 
@@ -55,11 +55,55 @@ Restart side effects:
 
 - `GET /ws`: WebSocket endpoint.
 - `GET /`: static assets (embedded or `--static-dir`).
-- `GET /t` and `GET /t/*`: serve `index.html` for terminal route.
+- `GET /p` and `GET /p/*`: serve `index.html` for terminal route.
 - `GET /api/state`, `/api/state.json`: JSON pane list for the target session.
 - `GET /api/state.html`: simple HTML list of pane links.
+- `GET /api/contents/{pane}`: raw `text/plain` pane capture for a specific target-session pane number.
+  - Default (`?escapes` omitted or falsey): output from `capture-pane -p -t <pane-id>`.
+  - Escaped (`?escapes=1`, `true`, or `yes`): output from `capture-pane -p -e -t <pane-id>`.
 
 `/api/state*` responses are filtered to panes where `session_name == target-session`.
+
+`/api/state*` pane entries expose `pane` (number), not the absolute tmux pane id token.
+
+`/api/contents/{pane}` requires `pane` to exist in the target session and returns `404` otherwise.
+
+### Route Parameter Types and Matchers
+
+The API should treat path parameters as typed values, not raw strings.
+
+Current parameter types:
+
+- `PaneNumber`
+  - Used by: `/p/{pane}` and `/api/contents/{pane}`
+  - Canonical form: non-negative base-10 integer (examples: `0`, `1`, `12`).
+  - Matcher (decoded token): `^[0-9]+$`
+  - Accepted URL path forms:
+    - raw token in path segment: `0`
+
+Validation and normalization rules for `PaneNumber`:
+
+- Reject empty values.
+- Reject values containing `/` after decoding.
+- Parse as integer and reject negative values.
+- Validate normalized value against `^[0-9]+$`.
+
+### `net/http` Integration (flag-inspired)
+
+Because `net/http` does not provide typed path params directly, route handlers should use a small adapter that is conceptually similar to `flag.Value`:
+
+- Define a parser interface for path params:
+  - `Set(string) error` for parsing + validation
+  - `String() string` for canonical serialization
+- Each parameter type (currently `PaneNumber`) implements this interface.
+- Handler flow:
+  1. Extract raw segment from request path.
+  2. Decode URL escaping once.
+  3. Call `Set(raw)` on the typed parameter.
+  4. Use typed value in handler logic.
+  5. Return `404` for route mismatch (missing/invalid segment shape), `400` for syntactically invalid parameter where route matched but value is invalid.
+
+This keeps parsing logic centralized, testable, and consistent with how `flag` delegates parsing to typed values.
 
 ## WebSocket Protocol
 
@@ -132,12 +176,8 @@ Client behavior:
 ## Browser UI Behavior
 
 - `index.html` renders one terminal host, no tab bar and no pane grid.
-- Route token is read from `/t/<token>`:
-  - If token matches `%\d+`, it is used as-is.
-  - Otherwise token is URI-decoded.
-- Pane resolution order:
-  - Exact pane id match.
-  - Case-insensitive match against pane `name`.
+- Route token is read from `/p/<n>` where `n` is a non-negative integer.
+- Pane resolution is by exact pane number (`pane_index`).
 - If no pane matches, UI logs a warning and does not attach terminal input/output.
 
 Terminal behavior:
@@ -167,7 +207,7 @@ Input and resize:
 ## Multi-Client Semantics (Current)
 
 - Multiple browser clients may connect simultaneously.
-- Each browser page is independently bound to the pane token in its own URL.
+- Each browser page is independently bound to the pane number in its own URL.
 - There is no server-side per-client focus model; pane targeting is explicit in each command from the client.
 
 ## Security Model

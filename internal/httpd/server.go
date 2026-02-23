@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/ampcode/wmux/internal/assets"
@@ -26,10 +27,11 @@ func NewServer(cfg Config) (http.Handler, error) {
 	mux.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) { serveAPIState(w, r, cfg.Hub) })
 	mux.HandleFunc("/api/state.json", func(w http.ResponseWriter, r *http.Request) { serveAPIState(w, r, cfg.Hub) })
 	mux.HandleFunc("/api/state.html", func(w http.ResponseWriter, r *http.Request) { serveAPIState(w, r, cfg.Hub) })
-	mux.HandleFunc("/t", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/contents/", func(w http.ResponseWriter, r *http.Request) { serveAPIContents(w, r, cfg.Hub) })
+	mux.HandleFunc("/p", func(w http.ResponseWriter, r *http.Request) {
 		serveIndex(w, r, cfg.StaticDir)
 	})
-	mux.HandleFunc("/t/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/p/", func(w http.ResponseWriter, r *http.Request) {
 		serveIndex(w, r, cfg.StaticDir)
 	})
 
@@ -87,7 +89,7 @@ func serveAPIState(w http.ResponseWriter, r *http.Request, hub *wshub.Hub) {
 		for _, pane := range panes {
 			title := pane.Name
 			if strings.TrimSpace(title) == "" {
-				title = pane.ID
+				title = fmt.Sprintf("pane %d", pane.Pane)
 			}
 			rows = append(rows, struct {
 				Title string
@@ -96,7 +98,7 @@ func serveAPIState(w http.ResponseWriter, r *http.Request, hub *wshub.Hub) {
 			}{
 				Title: title,
 				Size:  fmt.Sprintf("%dx%d", pane.Width, pane.Height),
-				Href:  paneTargetHref(pane.ID),
+				Href:  paneTargetHref(pane.Pane),
 			})
 		}
 		_ = stateHTMLTemplate.Execute(w, struct {
@@ -115,9 +117,57 @@ func serveAPIState(w http.ResponseWriter, r *http.Request, hub *wshub.Hub) {
 	}{Panes: panes})
 }
 
-func paneTargetHref(paneID string) string {
-	// tmux pane IDs are tokens like %13; keep % raw so links don't become /t/%2513.
-	return "/t/" + paneID
+func serveAPIContents(w http.ResponseWriter, r *http.Request, hub *wshub.Hub) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	paneNumber, ok := parsePaneNumberPath(r.URL.EscapedPath(), "/api/contents/")
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+
+	paneID, found := hub.TargetSessionPaneIDByNumber(paneNumber)
+	if !found {
+		http.Error(w, "pane not found", http.StatusNotFound)
+		return
+	}
+
+	withEscapes := parseEscapesFlag(r)
+	content, err := hub.CapturePaneContent(paneID, withEscapes)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = io.WriteString(w, content)
+}
+
+func parsePaneNumberPath(escapedPath, prefix string) (int, bool) {
+	if !strings.HasPrefix(escapedPath, prefix) {
+		return 0, false
+	}
+	raw := strings.TrimPrefix(escapedPath, prefix)
+	if raw == "" || strings.Contains(raw, "/") {
+		return 0, false
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+func parseEscapesFlag(r *http.Request) bool {
+	v := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("escapes")))
+	return v == "1" || v == "true" || v == "yes"
+}
+
+func paneTargetHref(paneNumber int) string {
+	return fmt.Sprintf("/p/%d", paneNumber)
 }
 
 func negotiateStateFormat(r *http.Request) string {

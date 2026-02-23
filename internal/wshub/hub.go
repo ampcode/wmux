@@ -33,11 +33,12 @@ type Hub struct {
 }
 
 type PaneInfo struct {
-	ID          string `json:"id"`
+	Pane        int    `json:"pane"`
 	Name        string `json:"name"`
 	SessionName string `json:"session_name"`
 	Width       int    `json:"width"`
 	Height      int    `json:"height"`
+	ID          string `json:"-"`
 }
 
 type client struct {
@@ -94,8 +95,15 @@ type paneCursorPayload struct {
 }
 
 type pendingCommand struct {
-	Name       string
-	TargetPane string
+	Name             string
+	TargetPane       string
+	EmitPaneSnapshot bool
+	Wait             chan commandResult
+}
+
+type commandResult struct {
+	Success bool
+	Output  []string
 }
 
 var upgrader = websocket.Upgrader{
@@ -173,6 +181,7 @@ func (h *Hub) CurrentTargetSessionPaneInfos() []PaneInfo {
 	out := make([]PaneInfo, 0, len(panes))
 	for _, pane := range panes {
 		out = append(out, PaneInfo{
+			Pane:        pane.PaneIndex,
 			ID:          pane.ID,
 			Name:        pane.Name,
 			SessionName: pane.SessionName,
@@ -181,6 +190,40 @@ func (h *Hub) CurrentTargetSessionPaneInfos() []PaneInfo {
 		})
 	}
 	return out
+}
+
+func (h *Hub) TargetSessionPaneIDByNumber(paneNumber int) (string, bool) {
+	for _, pane := range h.CurrentTargetSessionPaneInfos() {
+		if pane.Pane == paneNumber {
+			return pane.ID, true
+		}
+	}
+	return "", false
+}
+
+func (h *Hub) CapturePaneContent(paneID string, withEscapes bool) (string, error) {
+	paneID = strings.TrimSpace(paneID)
+	if paneID == "" {
+		return "", fmt.Errorf("pane id is required")
+	}
+
+	argv := []string{"capture-pane", "-p", "-t", paneID}
+	if withEscapes {
+		argv = []string{"capture-pane", "-p", "-e", "-t", paneID}
+	}
+
+	res, err := h.runCommandAndWait(argv, 5*time.Second, false)
+	if err != nil {
+		return "", err
+	}
+	if !res.Success {
+		if withEscapes {
+			return "", fmt.Errorf("capture-pane with escapes failed")
+		}
+		return "", fmt.Errorf("capture-pane without escapes failed")
+	}
+
+	return strings.Join(res.Output, "\n"), nil
 }
 
 func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request) {
@@ -246,6 +289,12 @@ func (h *Hub) consumeParserEvents(parser *tmuxparse.StreamParser) {
 		switch e := ev.(type) {
 		case tmuxparse.Command:
 			pending := h.shiftPending()
+			if pending.Wait != nil {
+				select {
+				case pending.Wait <- commandResult{Success: e.Success, Output: append([]string(nil), e.Output...)}:
+				default:
+				}
+			}
 			var state *statePayload
 			h.mu.Lock()
 			if h.model.applyOutputLines(e.Output) {
@@ -264,7 +313,7 @@ func (h *Hub) consumeParserEvents(parser *tmuxparse.StreamParser) {
 			if state != nil {
 				h.broadcast(serverMsg{T: "tmux_state", State: state})
 			}
-			if pending.Name == "capture-pane" && pending.TargetPane != "" {
+			if pending.Name == "capture-pane" && pending.TargetPane != "" && pending.EmitPaneSnapshot {
 				h.broadcast(serverMsg{T: "pane_snapshot", PaneSnapshot: &paneSnapshotPayload{
 					PaneID: pending.TargetPane,
 					Data:   strings.Join(e.Output, "\n"),
@@ -364,6 +413,13 @@ func (h *Hub) registerPending(argv []string) {
 	if len(argv) == 0 {
 		return
 	}
+	p := pendingFromArgv(argv)
+	h.mu.Lock()
+	h.pending = append(h.pending, p)
+	h.mu.Unlock()
+}
+
+func pendingFromArgv(argv []string) pendingCommand {
 	p := pendingCommand{Name: strings.ToLower(strings.TrimSpace(argv[0]))}
 	for i := 1; i < len(argv)-1; i++ {
 		if argv[i] == "-t" {
@@ -371,9 +427,56 @@ func (h *Hub) registerPending(argv []string) {
 			break
 		}
 	}
+	if p.Name == "capture-pane" && p.TargetPane != "" {
+		p.EmitPaneSnapshot = true
+	}
+	return p
+}
+
+func (h *Hub) runCommandAndWait(argv []string, timeout time.Duration, emitPaneSnapshot bool) (commandResult, error) {
+	if len(argv) == 0 {
+		return commandResult{}, fmt.Errorf("argv cannot be empty")
+	}
+	line, err := encodeArgvCommand(argv)
+	if err != nil {
+		return commandResult{}, err
+	}
+
+	done := make(chan commandResult, 1)
+	pending := pendingFromArgv(argv)
+	pending.Wait = done
+	pending.EmitPaneSnapshot = emitPaneSnapshot
+
 	h.mu.Lock()
-	h.pending = append(h.pending, p)
+	h.pending = append(h.pending, pending)
 	h.mu.Unlock()
+
+	if h.tmux == nil {
+		h.removePending(done)
+		return commandResult{}, fmt.Errorf("tmux backend unavailable")
+	}
+	if err := h.tmux.Send(line); err != nil {
+		h.removePending(done)
+		return commandResult{}, err
+	}
+
+	select {
+	case res := <-done:
+		return res, nil
+	case <-time.After(timeout):
+		return commandResult{}, fmt.Errorf("timed out waiting for tmux response")
+	}
+}
+
+func (h *Hub) removePending(done chan commandResult) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for i := range h.pending {
+		if h.pending[i].Wait == done {
+			h.pending = append(h.pending[:i], h.pending[i+1:]...)
+			return
+		}
+	}
 }
 
 func (h *Hub) shiftPending() pendingCommand {
