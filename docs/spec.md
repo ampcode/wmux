@@ -1,262 +1,187 @@
-# tmux Control-Mode Web Client (Go + xterm.js) — Full Specification
+# wmux Implementation Spec (Current Behavior)
+
+This document describes what the codebase currently implements.
 
 ## Goal
 
-Provide a web client for an existing `tmux` server on the same machine:
+`wmux` runs a single `tmux -CC` control-mode client and exposes a browser terminal for tmux panes over HTTP + WebSocket.
 
-- Connect via **tmux control mode** (`tmux -CC ...`)
-- Serve an **xterm.js UI over HTTP**
-- Use **WebSockets** for live interaction
-- Render **one xterm.js instance per tmux pane** (grid view)
-- Support **multiple simultaneous web clients** with **per-client focus** that does not interfere across tabs/users
-- Allow **killing windows**, otherwise window/pane management is read-only
-- Use **xterm.js native scrollback** (do not forward scroll events to tmux)
+Current UI scope:
 
-Non-goals:
-
-- Authentication/authorization handled by an external layer (reverse proxy, VPN, etc.)
-- Server does not invent a new API/command language; it speaks tmux commands 1:1
-
----
+- Single full-screen xterm.js terminal per browser page.
+- Page targets exactly one pane (from URL path `/t/<token>`).
+- Multiple web clients are supported concurrently.
 
 ## Terminology
 
-- **Target session**: the single tmux session wmux ensures, attaches to, and displays.
-
----
+- **Target session**: the one tmux session `wmux` ensures at startup and attaches to.
+- **Pane token**: URL token after `/t/`, usually a tmux pane id like `%13`.
 
 ## Configuration
 
-Command-line flags (or env equivalents):
+Flags (with env var equivalents):
 
-- `--listen` (default `127.0.0.1:8080`)
-- `--target-session <name>` (default `webui`)
-- `--static-dir <path>` (bundle or embed by default)
-- `--tmux-bin <path>` (default `tmux`)
-- `--restart-backoff` (e.g. exponential, max cap)
-
----
+- `--listen` (`WMUX_LISTEN`, default `127.0.0.1:8080`)
+- `--target-session` (`WMUX_TARGET_SESSION`, default `webui`)
+- `--static-dir` (`WMUX_STATIC_DIR`, default embedded assets)
+- `--tmux-bin` (`WMUX_TMUX_BIN`, default `tmux`)
+- `--restart-backoff` (`WMUX_RESTART_BACKOFF`, default `500ms`)
+- `--restart-max-backoff` (`WMUX_RESTART_MAX_BACKOFF`, default `10s`)
 
 ## Startup Sequence
 
-1. Ensure tmux server reachable:
-   - Execute `tmux -V` (optional sanity check)
-2. Ensure target session exists:
-   - If missing: `tmux new-session -d -s <target-session>`
-3. Spawn a single long-lived tmux control client for the target session:
-   - `tmux -CC attach-session -t <target-session>`
-4. Establish stdout line reader + stdin writer for the tmux control client.
-5. Start HTTP server:
-   - `GET /` serves the web app
-   - `GET /ws` upgrades to WebSocket
-
----
+1. Validate tmux binary with `tmux -V`.
+2. Ensure the target session exists (`has-session`, then `new-session -d -s <name>` if missing).
+3. Build `wshub` and bind it to a `tmuxproc.Manager`.
+4. Start manager loop for `tmux -CC attach-session -t <target-session>`.
+5. Start HTTP server.
+6. Trigger initial state sync (`list-panes` model query with retry).
 
 ## tmux Control-Mode Backend
 
-### Process Model
+- Exactly one long-lived `tmux -CC` child process per `wmux` process.
+- Process is attached through a PTY (`github.com/creack/pty`).
+- Stdout is scanned line-by-line and fed into a parser.
+- Client commands are written as newline-terminated tmux command lines.
+- On child exit, manager restarts with exponential backoff up to `restart-max-backoff`.
 
-- Exactly **one** `tmux -CC` process per server instance (single target session).
-- If it dies, **restart**, re-attach, and broadcast a resync event to all web clients.
+Restart side effects:
 
-### I/O Rules
+- Hub resets parser and in-memory model.
+- Hub broadcasts `tmux_state` (empty snapshot) and `tmux_restarted`.
+- Hub re-requests pane model state.
 
-- Read tmux stdout **line-by-line** (newline-delimited protocol).
-- Forward client-issued tmux command lines to tmux stdin (newline-terminated).
+## HTTP Endpoints
 
-### Output Broadcasting
+- `GET /ws`: WebSocket endpoint.
+- `GET /`: static assets (embedded or `--static-dir`).
+- `GET /t` and `GET /t/*`: serve `index.html` for terminal route.
+- `GET /api/state`, `/api/state.json`: JSON pane list for the target session.
+- `GET /api/state.html`: simple HTML list of pane links.
 
-- Server broadcasts raw control-mode lines to connected web clients.
-- Optional: server may also emit a small wrapper message type for lifecycle events (e.g. `tmux_restarted`), but should not translate tmux protocol.
-
----
+`/api/state*` responses are filtered to panes where `session_name == target-session`.
 
 ## WebSocket Protocol
 
-### Message Types
+All frames are JSON text messages.
+
+### Client -> Server
 
-All JSON messages are UTF-8 text frames unless noted.
+Only one message type is accepted:
+
+```json
+{ "t": "cmd", "argv": ["send-keys", "-t", "%13", "-l", "ls"] }
+```
 
-#### Client → Server
+Rules:
 
-1. **tmux command line**
-   - `{ "t": "cmd", "line": "send-keys -t %7 -l \"ls -la\\r\"" }`
-2. **binary tmux bytes (optional)**
-   - Binary WS frames MAY be supported, but by default mouse/app input should be represented as `send-keys` commands (see Mouse section).
+- `argv` is converted to one tmux command line using shell-safe quoting.
+- Command name is lowercased before dispatch.
+- Empty command or invalid command token is rejected.
 
-#### Server → Client
+### Server -> Client
 
-1. **tmux protocol line**
-   - `{ "t": "tmux", "line": "%output %7 ..." }`
-2. **lifecycle**
-   - `{ "t": "tmux_restarted" }`
-   - `{ "t": "error", "message": "..." }`
+- `tmux_state`
+  - Snapshot of parsed model (`windows`, `panes`).
+  - Sent immediately on connect and after model changes.
+- `tmux_command`
+  - Parsed `%begin/%end/%error` command block with header and output lines.
+- `tmux_notification`
+  - Parsed `%...` notification fields (`name`, `args`, `text`, `value`).
+- `pane_output`
+  - Decoded pane output stream for `%output` / `%extended-output` notifications.
+- `pane_snapshot`
+  - Emitted when a pending `capture-pane` response completes.
+- `pane_cursor`
+  - Emitted when a pending `display-message` cursor query returns the expected marker format.
+- `tmux_restarted`
+  - Emitted when control process restarts.
+- `error`
+  - Validation, backend, parse, or JSON decoding errors.
 
-### Policy / Validation (Server-Side)
+## Command Policy
 
-To preserve multi-client semantics, the server MUST block commands that change the tmux _client_’s global selection/focus.
+Server enforces a strict allowlist. Any other command is blocked.
 
-- **Denylist (default block):**
-  - `select-pane`, `select-window`, `switch-client`, `attach-session` (from WS), `detach-client`, `new-session`, `kill-session`, `rename-session`
-  - Any command that changes server-side tmux client state in a way that would cause tabs to fight
-- **Allowlist (default allow):**
-  - Input & interaction: `send-keys`, `resize-pane`, `kill-window`
-  - Read-only queries: `list-windows`, `list-panes`, `display-message`, `capture-pane`, `show-options`
-  - Window switching is performed by client-side state + read-only queries (not `select-window`)
+Allowed commands:
 
-Validation can be lightweight (prefix match / tokenization) but MUST be enforced.
+- `send-keys`
+- `resize-pane`
+- `kill-window`
+- `list-windows`
+- `list-panes`
+- `display-message`
+- `capture-pane`
+- `show-options`
 
----
+The policy validates command name only; argument-level constraints are not enforced.
 
-## Multi-Client Model (Per-Client Focus)
+## State Model and Sync
 
-### Requirement
+The hub keeps an in-memory model (`windows`, `panes`) updated from specially formatted command output lines.
 
-Two clients viewing the same target session:
+Built-in sync command format:
 
-- Client A focuses pane `%1` and types -> pane `%1` receives input
-- Client B focuses pane `%2` and types -> pane `%2` receives input
-- Neither client’s focus should affect the other
+- `list-panes -a -F "__WMUX___pane\t#{session_name}\t#{pane_id}\t#{window_id}\t#{pane_index}\t#{pane_active}\t#{pane_left}\t#{pane_top}\t#{pane_width}\t#{pane_height}\t#{pane_current_command}\t#{pane_title}"`
 
-### Rule
+Client behavior:
 
-All input MUST be explicitly targeted by pane id:
+- On WS open, it requests model sync via the same `list-panes` command.
+- On tmux notifications related to layout/window/pane/session changes, it schedules another sync.
 
-- `send-keys -t %<pane> ...`
-- `resize-pane -t %<pane> ...`
-- `kill-window -t @<win> ...`
+## Browser UI Behavior
 
-### Prohibition
+- `index.html` renders one terminal host, no tab bar and no pane grid.
+- Route token is read from `/t/<token>`:
+  - If token matches `%\d+`, it is used as-is.
+  - Otherwise token is URI-decoded.
+- Pane resolution order:
+  - Exact pane id match.
+  - Case-insensitive match against pane `name`.
+- If no pane matches, UI logs a warning and does not attach terminal input/output.
 
-Do not rely on tmux’s notion of “current pane/window” in the `-CC` process:
+Terminal behavior:
 
-- Do not use `select-pane` / `select-window` to represent web focus
+- xterm.js with fit addon and scrollback 10000.
+- On pane change:
+  - Reset terminal.
+  - Request `capture-pane -p -e -t <pane>` for snapshot.
+  - Request `display-message -p -t <pane> "__WMUX_CURSOR\t#{pane_cursor_x}\t#{pane_cursor_y}"`.
+- `pane_snapshot` seeds terminal content.
+- `pane_cursor` moves cursor with ANSI `CSI row;col H`.
+- `pane_output` appends live data for current pane only.
 
-### Where Focus Lives
+Input and resize:
 
-- Focus is purely **client-side** UI state: `focusedPaneId`.
-- Server does not need per-client focus state for correctness.
+- xterm `onData` is translated to `send-keys` commands, typically one character at a time.
+- Special mappings:
+  - `ESC` -> `Escape`
+  - `CR/LF` -> `Enter`
+  - space -> `Space`
+  - tab -> `Tab`
+  - `DEL` -> `BSpace`
+- Other characters use `send-keys -l <char>`.
+- Window resize triggers `fit()` and then:
+  - `resize-pane -t <pane> -x <cols> -y <rows>`
 
----
+## Multi-Client Semantics (Current)
 
-## UI Behavior
+- Multiple browser clients may connect simultaneously.
+- Each browser page is independently bound to the pane token in its own URL.
+- There is no server-side per-client focus model; pane targeting is explicit in each command from the client.
 
-### Window Display
+## Security Model
 
-- Show **only windows from the target session** in a **tab bar**.
-- No UI session windows are displayed.
+- No built-in authentication/authorization.
+- Deployment is expected behind external access control.
+- Command allowlist is still enforced server-side.
 
-### Pane Display
+## Known Gaps vs Original Full Vision
 
-- For the currently selected window, render a **grid of xterm.js terminals**, one per pane.
-- Click in a pane sets client-local focus to that pane.
-- Keyboard input is routed to the focused pane via `send-keys -t %pane ...`.
+Not currently implemented:
 
-### Window Kill
-
-- UI includes “kill window” action:
-  - `kill-window -t @<window_id>`
-- All other window operations are read-only in the UI.
-
----
-
-## Scrolling & Mouse
-
-### Scrolling
-
-- Use **xterm.js native scrollback**.
-- Do **not** forward scroll wheel events to tmux.
-- Recommendation: do **not** enable tmux `mouse` option globally, because it tends to capture scrolling for copy-mode.
-
-### Mouse Support (Now)
-
-There are two categories:
-
-1. **UI mouse (focus, split resize)**
-
-- Focus handled locally by the web app.
-- Split resize handled by UI -> compute rows/cols -> `resize-pane -t %pane -x <cols> -y <rows>`.
-
-1. **Application mouse (inside terminal apps)**
-
-- xterm.js can emit mouse reporting sequences (often SGR, ASCII).
-- Client forwards these sequences to tmux via `send-keys` without requiring tmux mouse mode:
-  - For sequences starting with ESC:
-    - `send-keys -t %PANE Escape`
-    - `send-keys -t %PANE -l "[<...rest...>"`
-- If a sequence cannot be represented safely in JSON/UTF-8, client MAY send WS binary, but the preferred baseline is `send-keys`.
-
----
-
-## Resize Model (Web UI Decides)
-
-- UI computes pane rectangles and converts pixel size to terminal rows/cols using xterm’s measured cell size.
-- On layout change or window resize, client emits resize commands:
-  - `resize-pane -t %<pane> -x <cols> -y <rows>`
-- If tmux layout changes externally (splits/resizes by another tmux client), the web UI updates based on control-mode notifications and/or periodic queries.
-
----
-
-## State Acquisition & Sync
-
-### Initial Load (Client)
-
-On connect, client should query state using tmux commands (server forwards):
-
-- `list-windows -t <target-session> -F "<format>"`
-- `list-panes -t <target-session> -a -F "<format>"`
-- `display-message -p -t @<win> "#{window_layout}"` (or equivalent)
-- Optional: `capture-pane -t %<pane> -p` to seed terminal content
-
-Client then builds:
-
-- window tab list
-- current window pane layout tree/grid mapping
-- terminal instances and attaches output streams by pane id
-
-### Live Updates
-
-- Client processes async control-mode notifications to keep state current.
-- Pane output lines `%output %<pane> ...` are decoded/handled by client and appended to that pane’s xterm.
-
-### Server Restart / tmux Restart
-
-If the `tmux -CC` process restarts:
-
-- Server sends `{ "t":"tmux_restarted" }`
-- Clients re-run initial load queries and re-bind terminals
-
----
-
-## Error Handling
-
-- Malformed/blocked commands:
-  - Server returns `{ "t":"error", "message":"blocked command: select-pane" }`
-- tmux command errors (from control-mode `%error`):
-  - Server forwards raw tmux line; client surfaces in UI
-
----
-
-## Security
-
-- This system assumes authn/z is handled externally.
-- Server must still enforce the denylist/allowlist to preserve multi-client correctness and reduce blast radius.
-
----
-
-## Implementation Notes (Suggested Structure)
-
-Go packages:
-
-- `tmuxproc`: spawn/restart, stdin writer, stdout reader
-- `wshub`: client connections, broadcast, command forwarding
-- `policy`: command validation/allowlist-denylist
-- `httpd`: static files + ws endpoint
-
-Client:
-
-- xterm.js per pane
-- tab bar for windows
-- local focus state
-- emits tmux commands (1:1) over WS
-- parses tmux control-mode lines to update UI model
+- Window tab UI.
+- Multi-pane grid rendering in one page.
+- Raw tmux line passthrough protocol.
+- Binary WebSocket input frames.
+- Rich UI actions beyond terminal interaction and command-level support in allowlisted tmux commands.
