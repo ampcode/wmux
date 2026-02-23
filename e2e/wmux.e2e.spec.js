@@ -1,5 +1,6 @@
 const { test, expect } = require('@playwright/test');
 const { execFileSync, spawn } = require('node:child_process');
+const net = require('node:net');
 
 function sh(command, args, opts = {}) {
   return execFileSync(command, args, {
@@ -34,6 +35,28 @@ async function waitFor(check, timeoutMs, intervalMs = 200) {
   throw new Error('timed out waiting for condition');
 }
 
+async function getFreePort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.on('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      if (!address || typeof address === 'string') {
+        server.close(() => reject(new Error('failed to resolve dynamic port')));
+        return;
+      }
+      const { port } = address;
+      server.close((err) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+        resolve(port);
+      });
+    });
+  });
+}
+
 test.describe.configure({ mode: 'serial' });
 
 const missing = [];
@@ -58,7 +81,7 @@ test.beforeAll(async () => {
   paneId = sh('bash', ['./scripts/setup-e2e-tmux-fixture.sh', sessionName]);
   paneNumber = Number(sh('tmux', ['display-message', '-p', '-t', paneId, '#{pane_index}']));
 
-  port = 19000 + Math.floor(Math.random() * 1000);
+  port = await getFreePort();
   baseURL = `http://127.0.0.1:${port}`;
 
   wmuxProc = spawn(
@@ -75,12 +98,22 @@ test.beforeAll(async () => {
     logs += chunk.toString();
   });
 
+  let wmuxExited = false;
+  wmuxProc.on('exit', (code, signal) => {
+    wmuxExited = true;
+    logs += `\n[wmux exited] code=${code} signal=${signal}`;
+  });
+
   await waitFor(async () => {
+    if (wmuxExited) return false;
     try {
       const res = await fetch(`${baseURL}/api/state.json`);
       if (!res.ok) return false;
       const body = await res.json();
-      return Array.isArray(body.panes) && body.panes.some((p) => p.pane === paneNumber);
+      return (
+        Array.isArray(body.panes) &&
+        body.panes.some((p) => p.pane === paneNumber && p.session_name === sessionName)
+      );
     } catch {
       return false;
     }
@@ -148,22 +181,32 @@ test('headless flow covers state, pane attach, input mapping, and resize', async
     throw new Error(`terminal never mounted; browser logs:\n${browserLogs.join('\n')}`);
   }
 
+  const baselineTerminalText = await page.locator('.xterm-rows').innerText();
+  const baselineCapture = sh('tmux', ['capture-pane', '-pt', paneId, '-S', '-120']);
+
+  const externalMarker = `__WMUX_EXTERNAL_${Date.now()}__`;
+  sh('tmux', ['send-keys', '-t', paneId, externalMarker, 'Enter']);
+
   await expect
     .poll(async () => {
       const txt = await page.locator('.xterm-rows').innerText();
       return txt;
     })
-    .toContain('__WMUX_E2E_READY__');
+    .not.toBe(baselineTerminalText);
 
-  sh('tmux', ['send-keys', '-t', paneId, '__WMUX_EXTERNAL__', 'Enter']);
   await expect
-    .poll(async () => {
-      const txt = await page.locator('.xterm-rows').innerText();
-      return txt;
-    })
-    .toContain('__WMUX_INPUT_Q__:__WMUX_EXTERNAL__');
+    .poll(async () => page.locator('.xterm-rows').innerText())
+    .toContain(externalMarker);
 
-  await page.keyboard.type('ab');
+  await waitFor(() => {
+    const cap = sh('tmux', ['capture-pane', '-pt', paneId, '-S', '-120']);
+    return cap !== baselineCapture && cap.includes(externalMarker);
+  }, 10_000);
+
+  const inputMarker = `WMUXE2E${Date.now()}`;
+  const expectedQuotedInput = `__WMUX_INPUT_Q__:$'${inputMarker}ac\\td'`;
+
+  await page.keyboard.type(`${inputMarker}ab`);
   await page.keyboard.press('Backspace');
   await page.keyboard.type('c');
   await page.keyboard.press('Tab');
@@ -172,7 +215,7 @@ test('headless flow covers state, pane attach, input mapping, and resize', async
 
   await waitFor(() => {
     const cap = sh('tmux', ['capture-pane', '-pt', paneId, '-S', '-80']);
-    return cap.includes("__WMUX_INPUT_Q__:$'ac\\td'");
+    return cap.includes(expectedQuotedInput);
   }, 10_000);
 
   const sentArgv = await page.evaluate(() => window.__wmuxSent.map((m) => m.argv || []));

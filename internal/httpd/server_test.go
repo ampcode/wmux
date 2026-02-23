@@ -19,6 +19,54 @@ func TestPaneTargetHrefUsesPaneNumberPath(t *testing.T) {
 	}
 }
 
+func TestRootRedirectsToFirstPane(t *testing.T) {
+	hub := wshub.New(policy.Default(), "webui")
+	tmux := &scriptedTmuxSender{hub: hub}
+	if err := hub.BindTmux(tmux); err != nil {
+		t.Fatalf("BindTmux: %v", err)
+	}
+	if err := hub.RequestStateSync(); err != nil {
+		t.Fatalf("RequestStateSync: %v", err)
+	}
+	waitForTargetPaneNumber(t, hub, 0)
+
+	h, err := NewServer(Config{Hub: hub})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Location"); got != "/p/0" {
+		t.Fatalf("location = %q, want %q", got, "/p/0")
+	}
+}
+
+func TestRootRedirectsToStatePageWhenNoPanesAvailable(t *testing.T) {
+	hub := wshub.New(policy.Default(), "webui")
+
+	h, err := NewServer(Config{Hub: hub})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Location"); got != "/api/state.html" {
+		t.Fatalf("location = %q, want %q", got, "/api/state.html")
+	}
+}
+
 func TestAPIContentsReturnsRawPlainPaneContents(t *testing.T) {
 	hub := wshub.New(policy.Default(), "webui")
 	tmux := &scriptedTmuxSender{hub: hub}

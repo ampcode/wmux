@@ -157,23 +157,36 @@ func (h *Hub) RequestStateSyncWithRetry() {
 func (h *Hub) CurrentState() statePayload {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	return h.model.snapshot()
+	return filterStateToTargetSession(h.model.snapshot(), h.targetSession)
 }
 
 func (h *Hub) CurrentTargetSessionPanes() []panePayload {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	state := h.model.snapshot()
-	if h.targetSession == "" {
-		return state.Panes
+	return h.CurrentState().Panes
+}
+
+func filterStateToTargetSession(state statePayload, targetSession string) statePayload {
+	if targetSession == "" {
+		return state
 	}
-	filtered := make([]panePayload, 0, len(state.Panes))
+
+	filteredPanes := make([]panePayload, 0, len(state.Panes))
+	windowIDs := make(map[string]struct{}, len(state.Panes))
 	for _, pane := range state.Panes {
-		if pane.SessionName == h.targetSession {
-			filtered = append(filtered, pane)
+		if pane.SessionName != targetSession {
+			continue
+		}
+		filteredPanes = append(filteredPanes, pane)
+		windowIDs[pane.WindowID] = struct{}{}
+	}
+
+	filteredWindows := make([]windowPayload, 0, len(state.Windows))
+	for _, window := range state.Windows {
+		if _, ok := windowIDs[window.ID]; ok {
+			filteredWindows = append(filteredWindows, window)
 		}
 	}
-	return filtered
+
+	return statePayload{Windows: filteredWindows, Panes: filteredPanes}
 }
 
 func (h *Hub) CurrentTargetSessionPaneInfos() []PaneInfo {

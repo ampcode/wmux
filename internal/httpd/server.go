@@ -39,7 +39,13 @@ func NewServer(cfg Config) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	mux.Handle("/", staticHandler)
+	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			redirectToFirstPane(w, r, cfg.Hub)
+			return
+		}
+		staticHandler.ServeHTTP(w, r)
+	}))
 	return mux, nil
 }
 
@@ -144,6 +150,28 @@ func serveAPIContents(w http.ResponseWriter, r *http.Request, hub *wshub.Hub) {
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	_, _ = io.WriteString(w, content)
+}
+
+func redirectToFirstPane(w http.ResponseWriter, r *http.Request, hub *wshub.Hub) {
+	if href, ok := firstTargetPaneHref(hub); ok {
+		http.Redirect(w, r, href, http.StatusFound)
+		return
+	}
+	http.Redirect(w, r, "/api/state.html", http.StatusFound)
+}
+
+func firstTargetPaneHref(hub *wshub.Hub) (string, bool) {
+	panes := hub.CurrentTargetSessionPaneInfos()
+	if len(panes) == 0 {
+		return "", false
+	}
+	firstPane := panes[0].Pane
+	for _, pane := range panes[1:] {
+		if pane.Pane < firstPane {
+			firstPane = pane.Pane
+		}
+	}
+	return paneTargetHref(firstPane), true
 }
 
 func parsePaneNumberPath(escapedPath, prefix string) (int, bool) {
