@@ -1,2 +1,4 @@
 [tools]
 "github:vercel-labs/agent-browser" = "latest"
+go = "latest"
+node = "22"
