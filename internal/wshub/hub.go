@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/ampcode/wmux/internal/policy"
 	"github.com/ampcode/wmux/internal/tmuxparse"
@@ -20,14 +21,23 @@ type TmuxSender interface {
 }
 
 type Hub struct {
-	policy  policy.Policy
-	tmux    TmuxSender
-	parser  *tmuxparse.StreamParser
-	model   modelState
-	pending []pendingCommand
+	policy        policy.Policy
+	tmux          TmuxSender
+	parser        *tmuxparse.StreamParser
+	model         modelState
+	pending       []pendingCommand
+	targetSession string
 
 	mu      sync.RWMutex
 	clients map[*client]struct{}
+}
+
+type PaneInfo struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	SessionName string `json:"session_name"`
+	Width       int    `json:"width"`
+	Height      int    `json:"height"`
 }
 
 type client struct {
@@ -94,12 +104,13 @@ var upgrader = websocket.Upgrader{
 
 var safeBareToken = regexp.MustCompile(`^[A-Za-z0-9_@%:./+\-]+$`)
 
-func New(p policy.Policy) *Hub {
+func New(p policy.Policy, targetSession string) *Hub {
 	h := &Hub{
-		policy:  p,
-		clients: map[*client]struct{}{},
-		model:   newModelState(),
-		pending: []pendingCommand{},
+		policy:        p,
+		clients:       map[*client]struct{}{},
+		model:         newModelState(),
+		pending:       []pendingCommand{},
+		targetSession: targetSession,
 	}
 	h.resetParser()
 	return h
@@ -110,10 +121,66 @@ func (h *Hub) BindTmux(tmux TmuxSender) error {
 	return nil
 }
 
+func (h *Hub) RequestStateSync() error {
+	argv := []string{"list-panes", "-a", "-F", "__WMUX___pane\t#{session_name}\t#{pane_id}\t#{window_id}\t#{pane_index}\t#{pane_active}\t#{pane_left}\t#{pane_top}\t#{pane_width}\t#{pane_height}\t#{pane_current_command}\t#{pane_title}"}
+	line, err := encodeArgvCommand(argv)
+	if err != nil {
+		return err
+	}
+	if h.tmux == nil {
+		return fmt.Errorf("tmux backend unavailable")
+	}
+	if err := h.tmux.Send(line); err != nil {
+		return err
+	}
+	h.registerPending(argv)
+	return nil
+}
+
+func (h *Hub) RequestStateSyncWithRetry() {
+	for i := 0; i < 10; i++ {
+		if err := h.RequestStateSync(); err == nil {
+			return
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+}
+
 func (h *Hub) CurrentState() statePayload {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return h.model.snapshot()
+}
+
+func (h *Hub) CurrentTargetSessionPanes() []panePayload {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	state := h.model.snapshot()
+	if h.targetSession == "" {
+		return state.Panes
+	}
+	filtered := make([]panePayload, 0, len(state.Panes))
+	for _, pane := range state.Panes {
+		if pane.SessionName == h.targetSession {
+			filtered = append(filtered, pane)
+		}
+	}
+	return filtered
+}
+
+func (h *Hub) CurrentTargetSessionPaneInfos() []PaneInfo {
+	panes := h.CurrentTargetSessionPanes()
+	out := make([]PaneInfo, 0, len(panes))
+	for _, pane := range panes {
+		out = append(out, PaneInfo{
+			ID:          pane.ID,
+			Name:        pane.Name,
+			SessionName: pane.SessionName,
+			Width:       pane.Width,
+			Height:      pane.Height,
+		})
+	}
+	return out
 }
 
 func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request) {
@@ -158,6 +225,7 @@ func (h *Hub) BroadcastRestart() {
 	h.mu.Unlock()
 	h.broadcast(serverMsg{T: "tmux_state", State: &snapshot})
 	h.broadcast(serverMsg{T: "tmux_restarted"})
+	go h.RequestStateSyncWithRetry()
 }
 
 func (h *Hub) resetParser() {

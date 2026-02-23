@@ -204,7 +204,7 @@ function sendKeyStroke(paneId, ch) {
 }
 
 function requestModelSync() {
-  sendArgv(["list-panes", "-a", "-F", "__WMUX___pane\t#{pane_id}\t#{window_id}\t#{pane_index}\t#{pane_active}\t#{pane_left}\t#{pane_top}\t#{pane_width}\t#{pane_height}\t#{pane_title}"]);
+  sendArgv(["list-panes", "-a", "-F", "__WMUX___pane\t#{session_name}\t#{pane_id}\t#{window_id}\t#{pane_index}\t#{pane_active}\t#{pane_left}\t#{pane_top}\t#{pane_width}\t#{pane_height}\t#{pane_current_command}\t#{pane_title}"]);
 }
 
 function scheduleModelRefresh() {

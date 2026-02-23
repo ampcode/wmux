@@ -20,16 +20,17 @@ type windowPayload struct {
 }
 
 type panePayload struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	WindowID  string `json:"window_id"`
-	PaneIndex int    `json:"pane_index"`
-	Active    bool   `json:"active"`
-	Left      int    `json:"left"`
-	Top       int    `json:"top"`
-	Width     int    `json:"width"`
-	Height    int    `json:"height"`
-	Title     string `json:"title"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	SessionName string `json:"session_name"`
+	WindowID    string `json:"window_id"`
+	PaneIndex   int    `json:"pane_index"`
+	Active      bool   `json:"active"`
+	Left        int    `json:"left"`
+	Top         int    `json:"top"`
+	Width       int    `json:"width"`
+	Height      int    `json:"height"`
+	Title       string `json:"title"`
 }
 
 type modelState struct {
@@ -118,37 +119,51 @@ func (m *modelState) snapshot() statePayload {
 }
 
 func parsePane(parts []string) (panePayload, bool) {
-	paneIndex, err := strconv.Atoi(parts[3])
+	offset := 0
+	sessionName := ""
+	if len(parts) > 1 && !strings.HasPrefix(parts[1], "%") {
+		sessionName = parts[1]
+		offset = 1
+	}
+
+	paneIndex, err := strconv.Atoi(parts[3+offset])
 	if err != nil {
 		return panePayload{}, false
 	}
-	left, err := strconv.Atoi(parts[5])
+	left, err := strconv.Atoi(parts[5+offset])
 	if err != nil {
 		return panePayload{}, false
 	}
-	top, err := strconv.Atoi(parts[6])
+	top, err := strconv.Atoi(parts[6+offset])
 	if err != nil {
 		return panePayload{}, false
 	}
-	width, err := strconv.Atoi(parts[7])
+	width, err := strconv.Atoi(parts[7+offset])
 	if err != nil {
 		return panePayload{}, false
 	}
-	height, err := strconv.Atoi(parts[8])
+	height, err := strconv.Atoi(parts[8+offset])
 	if err != nil {
 		return panePayload{}, false
 	}
 
+	name := parts[9+offset]
+	title := name
+	if len(parts) > 10+offset {
+		title = parts[10+offset]
+	}
+
 	return panePayload{
-		ID:        parts[1],
-		Name:      parts[9],
-		WindowID:  parts[2],
-		PaneIndex: paneIndex,
-		Active:    parts[4] == "1",
-		Left:      left,
-		Top:       top,
-		Width:     width,
-		Height:    height,
-		Title:     parts[9],
+		ID:          parts[1+offset],
+		Name:        name,
+		SessionName: sessionName,
+		WindowID:    parts[2+offset],
+		PaneIndex:   paneIndex,
+		Active:      parts[4+offset] == "1",
+		Left:        left,
+		Top:         top,
+		Width:       width,
+		Height:      height,
+		Title:       title,
 	}, true
 }
