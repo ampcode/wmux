@@ -29,13 +29,13 @@ jobs:
 
       - name: Build binaries
         run: |
-          mkdir -p dist
           for target in darwin/arm64 linux/amd64 linux/arm64; do
             os="${target%/*}"
             arch="${target#*/}"
-            output="dist/wmux_${os}_${arch}"
-            GOOS="$os" GOARCH="$arch" go build -o "$output" ./cmd/wmux
-            tar -czf "${output}.tar.gz" -C dist "wmux_${os}_${arch}"
+            dir="dist/${os}_${arch}"
+            mkdir -p "$dir"
+            GOOS="$os" GOARCH="$arch" go build -o "$dir/wmux" ./cmd/wmux
+            tar -czf "dist/wmux_${os}_${arch}.tar.gz" -C "$dir" wmux
           done
 
       - name: Create release
