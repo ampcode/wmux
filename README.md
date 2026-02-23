@@ -89,3 +89,13 @@ Run tests:
 ```bash
 go test ./...
 ```
+
+Run headless end-to-end tests (real tmux + Playwright):
+
+```bash
+npm ci
+npx playwright install chromium
+npm run test:e2e
+```
+
+The E2E harness uses `scripts/setup-e2e-tmux-fixture.sh` to create a deterministic tmux session and pane worker.
