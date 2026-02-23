@@ -18,103 +18,23 @@ body {
   min-height: 100vh;
   font-family: "IBM Plex Sans", "SF Pro Text", system-ui, sans-serif;
   color: var(--text);
-  background: radial-gradient(circle at top right, #1a2836, var(--bg) 42%);
-  display: grid;
-  grid-template-rows: auto auto 1fr;
+  background: #000;
 }
 
-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 1rem;
-  padding: 0.6rem 0.8rem;
-  border-bottom: 1px solid var(--line);
-  background: color-mix(in oklab, var(--panel), black 18%);
-}
-
-#status {
-  font-size: 0.9rem;
-  color: var(--accent);
-}
-
-#errors {
-  font-size: 0.85rem;
-  color: var(--danger);
-}
-
-#tabs {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  padding: 0.4rem 0.6rem;
-  border-bottom: 1px solid var(--line);
-  overflow-x: auto;
-}
-
-.tab {
-  border: 1px solid var(--line);
-  background: var(--panel);
-  color: var(--text);
-  border-radius: 6px;
-  padding: 0.35rem 0.6rem;
-  font-size: 0.85rem;
-  cursor: pointer;
-}
-
-.tab.active {
-  border-color: var(--accent);
-  color: #d5f7f4;
-}
-
-.tab .kill {
-  margin-left: 0.45rem;
-  color: var(--danger);
-}
-
-#pane-grid {
-  position: relative;
-  min-height: 0;
-  overflow: auto;
-  padding: 0.55rem;
+#terminal-host {
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
 }
 
 .pane {
   position: absolute;
-  border: 1px solid var(--line);
-  border-radius: 6px;
+  inset: 0;
   overflow: hidden;
-  background: #0f1318;
-  transition: border-color 130ms ease;
-}
-
-.pane.focused {
-  border-color: var(--focus);
-}
-
-.pane-header {
-  height: 24px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-size: 0.75rem;
-  color: #9cb0c6;
-  background: color-mix(in oklab, #0f1318, #2a3746 26%);
-  padding: 0 0.5rem;
-  border-bottom: 1px solid #27303a;
+  background: #000;
 }
 
 .term {
   width: 100%;
-  height: calc(100% - 24px);
-}
-
-@media (max-width: 860px) {
-  #pane-grid {
-    padding: 0.35rem;
-  }
-
-  .pane-header {
-    font-size: 0.7rem;
-  }
+  height: 100%;
 }

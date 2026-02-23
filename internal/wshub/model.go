@@ -21,6 +21,7 @@ type windowPayload struct {
 
 type panePayload struct {
 	ID        string `json:"id"`
+	Name      string `json:"name"`
 	WindowID  string `json:"window_id"`
 	PaneIndex int    `json:"pane_index"`
 	Active    bool   `json:"active"`
@@ -140,6 +141,7 @@ func parsePane(parts []string) (panePayload, bool) {
 
 	return panePayload{
 		ID:        parts[1],
+		Name:      parts[9],
 		WindowID:  parts[2],
 		PaneIndex: paneIndex,
 		Active:    parts[4] == "1",

@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -47,6 +48,7 @@ type serverMsg struct {
 	Notification *notificationPayload `json:"notification,omitempty"`
 	PaneOutput   *paneOutputPayload   `json:"pane_output,omitempty"`
 	PaneSnapshot *paneSnapshotPayload `json:"pane_snapshot,omitempty"`
+	PaneCursor   *paneCursorPayload   `json:"pane_cursor,omitempty"`
 	State        *statePayload        `json:"state,omitempty"`
 }
 
@@ -73,6 +75,12 @@ type paneOutputPayload struct {
 type paneSnapshotPayload struct {
 	PaneID string `json:"pane_id"`
 	Data   string `json:"data"`
+}
+
+type paneCursorPayload struct {
+	PaneID string `json:"pane_id"`
+	X      int    `json:"x"`
+	Y      int    `json:"y"`
 }
 
 type pendingCommand struct {
@@ -102,6 +110,12 @@ func (h *Hub) BindTmux(tmux TmuxSender) error {
 	return nil
 }
 
+func (h *Hub) CurrentState() statePayload {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.model.snapshot()
+}
+
 func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -112,9 +126,14 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request) {
 	c := &client{conn: conn, send: make(chan serverMsg, 256)}
 	h.addClient(c)
 	defer h.removeClient(c)
+	c.enqueue(serverMsg{T: "tmux_state", State: statePointer(h.CurrentState())})
 
 	go c.writeLoop()
 	c.readLoop(h)
+}
+
+func statePointer(s statePayload) *statePayload {
+	return &s
 }
 
 func (h *Hub) BroadcastTmuxStdoutLine(line string) {
@@ -182,6 +201,12 @@ func (h *Hub) consumeParserEvents(parser *tmuxparse.StreamParser) {
 					PaneID: pending.TargetPane,
 					Data:   strings.Join(e.Output, "\n"),
 				}})
+			}
+			if pending.Name == "display-message" && pending.TargetPane != "" {
+				if cursor, ok := parsePaneCursorOutput(e.Output); ok {
+					cursor.PaneID = pending.TargetPane
+					h.broadcast(serverMsg{T: "pane_cursor", PaneCursor: cursor})
+				}
 			}
 		case tmuxparse.Notification:
 			if (e.Name == "output" || e.Name == "extended-output") && len(e.Args) >= 1 {
@@ -292,6 +317,26 @@ func (h *Hub) shiftPending() pendingCommand {
 	p := h.pending[0]
 	h.pending = h.pending[1:]
 	return p
+}
+
+func parsePaneCursorOutput(lines []string) (*paneCursorPayload, bool) {
+	if len(lines) == 0 {
+		return nil, false
+	}
+	line := strings.TrimSpace(lines[0])
+	parts := strings.Split(line, "\t")
+	if len(parts) != 3 || parts[0] != "__WMUX_CURSOR" {
+		return nil, false
+	}
+	x, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return nil, false
+	}
+	y, err := strconv.Atoi(parts[2])
+	if err != nil {
+		return nil, false
+	}
+	return &paneCursorPayload{X: x, Y: y}, true
 }
 
 func encodeArgvCommand(argv []string) (string, error) {

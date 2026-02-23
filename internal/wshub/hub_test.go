@@ -29,3 +29,13 @@ func TestEncodeArgvCommandRejectsEmpty(t *testing.T) {
 		t.Fatalf("expected error for empty argv")
 	}
 }
+
+func TestParsePaneCursorOutput(t *testing.T) {
+	c, ok := parsePaneCursorOutput([]string{"__WMUX_CURSOR\t12\t7"})
+	if !ok {
+		t.Fatalf("expected cursor parse success")
+	}
+	if c.X != 12 || c.Y != 7 {
+		t.Fatalf("unexpected cursor values: %#v", c)
+	}
+}

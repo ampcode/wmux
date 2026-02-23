@@ -1,23 +1,33 @@
-const statusEl = document.getElementById("status");
-const errorsEl = document.getElementById("errors");
-const tabsEl = document.getElementById("tabs");
-const paneGridEl = document.getElementById("pane-grid");
+const terminalHostEl = document.getElementById("terminal-host");
+
+const targetToken = parseTargetToken(location.pathname);
 
 const state = {
   ws: null,
-  windows: new Map(),
   panes: new Map(),
-  terminals: new Map(),
-  selectedWindowId: null,
-  focusedPaneId: null,
-  refreshTimer: null,
+  currentPaneId: null,
+  termBundle: null,
   resizeTimer: null,
+  refreshTimer: null,
 };
 
 connect();
-window.addEventListener("resize", () => {
-  schedulePaneResize();
-});
+window.addEventListener("resize", schedulePaneResize);
+
+function parseTargetToken(pathname) {
+  const m = pathname.match(/^\/t\/(.+)$/);
+  if (!m) return "";
+  const raw = m[1];
+  if (/^%\d+$/.test(raw)) {
+    // Pane IDs are tmux tokens like %11 and should not be URI-decoded.
+    return raw;
+  }
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
 
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -25,13 +35,10 @@ function connect() {
   state.ws = ws;
 
   ws.addEventListener("open", () => {
-    setStatus("connected");
-    clearError();
     requestModelSync();
   });
 
   ws.addEventListener("close", () => {
-    setStatus("disconnected; retrying…");
     setTimeout(connect, 1000);
   });
 
@@ -48,227 +55,115 @@ function connect() {
 
 function handleServerMessage(msg) {
   if (msg.t === "tmux_command") {
-    handleTmuxCommand(msg.command);
+    if (msg.command?.success === false && Array.isArray(msg.command.output) && msg.command.output.length) {
+      console.warn(msg.command.output.join("\n"));
+    }
     return;
   }
+
   if (msg.t === "tmux_notification") {
-    handleTmuxNotification(msg.notification);
+    const name = msg.notification?.name || "";
+    if (name === "layout-change" || name.startsWith("window-") || name.startsWith("pane-") || name === "sessions-changed") {
+      scheduleModelRefresh();
+    }
     return;
   }
-  if (msg.t === "pane_output") {
-    const paneOutput = msg.pane_output;
-    if (!paneOutput || !paneOutput.pane_id) return;
-    const termBundle = state.terminals.get(paneOutput.pane_id);
-    if (!termBundle) return;
-    termBundle.term.write(paneOutput.data || "");
-    return;
-  }
-  if (msg.t === "pane_snapshot") {
-    const snap = msg.pane_snapshot;
-    if (!snap || !snap.pane_id) return;
-    const termBundle = state.terminals.get(snap.pane_id);
-    if (!termBundle) return;
-    termBundle.term.reset();
-    const seeded = (snap.data || "").replace(/\n/g, "\r\n");
-    termBundle.term.write(seeded);
-    return;
-  }
+
   if (msg.t === "tmux_state") {
     applyState(msg.state);
     return;
   }
+
+  if (msg.t === "pane_snapshot") {
+    const snap = msg.pane_snapshot;
+    if (!snap || snap.pane_id !== state.currentPaneId || !state.termBundle) return;
+    state.termBundle.term.reset();
+    const seeded = normalizeSnapshotData(snap.data || "").replace(/\n/g, "\r\n");
+    state.termBundle.term.write(seeded);
+    return;
+  }
+
+  if (msg.t === "pane_cursor") {
+    const c = msg.pane_cursor;
+    if (!c || c.pane_id !== state.currentPaneId || !state.termBundle) return;
+    const row = Math.max(1, Number(c.y || 0) + 1);
+    const col = Math.max(1, Number(c.x || 0) + 1);
+    state.termBundle.term.write(`\u001b[${row};${col}H`);
+    return;
+  }
+
+  if (msg.t === "pane_output") {
+    const out = msg.pane_output;
+    if (!out || out.pane_id !== state.currentPaneId || !state.termBundle) return;
+    state.termBundle.term.write(out.data || "");
+    return;
+  }
+
   if (msg.t === "tmux_restarted") {
-    setStatus("tmux restarted; syncing…");
     requestModelSync();
     return;
   }
+
   if (msg.t === "error") {
-    setError(msg.message || "unknown error");
-  }
-}
-
-function handleTmuxCommand(command) {
-  if (!command || !Array.isArray(command.output)) return;
-  if (command.success === false && command.output.length) {
-    setError(command.output.join("\n"));
-  }
-}
-
-function handleTmuxNotification(notification) {
-  if (!notification || !notification.name) return;
-  const name = notification.name;
-  if (name === "layout-change" || name.startsWith("window-") || name.startsWith("pane-") || name === "sessions-changed") {
-    scheduleModelRefresh();
-    return;
-  }
-
-  if (name === "window-renamed") {
-    const [windowId, newName] = [notification.args?.[0], notification.text || ""];
-    if (windowId && state.windows.has(windowId)) {
-      const win = state.windows.get(windowId);
-      state.windows.set(windowId, { ...win, name: newName || win.name });
-      renderTabs();
-    }
+    console.warn(msg.message || "unknown error");
   }
 }
 
 function applyState(snapshot) {
-  if (!snapshot) return;
-
-  state.windows.clear();
   state.panes.clear();
-
-  for (const w of snapshot.windows || []) {
-    state.windows.set(w.id, {
-      id: w.id,
-      index: Number(w.index || 0),
-      name: w.name || "",
-    });
-  }
-
-  for (const p of snapshot.panes || []) {
+  for (const p of snapshot?.panes || []) {
     state.panes.set(p.id, {
       id: p.id,
-      windowId: p.window_id,
-      paneIndex: Number(p.pane_index || 0),
-      active: !!p.active,
-      left: Number(p.left || 0),
-      top: Number(p.top || 0),
+      name: p.name || p.title || "",
       width: Number(p.width || 0),
       height: Number(p.height || 0),
-      title: p.title || "",
+      active: !!p.active,
     });
   }
 
-  if (state.focusedPaneId && !state.panes.has(state.focusedPaneId)) {
-    state.focusedPaneId = null;
-  }
-  if (!state.focusedPaneId) {
-    const activePane = [...state.panes.values()].find((p) => p.active);
-    if (activePane) {
-      state.focusedPaneId = activePane.id;
-    }
-  }
-  if (state.selectedWindowId && !state.windows.has(state.selectedWindowId)) {
-    state.selectedWindowId = null;
-  }
-  if (!state.selectedWindowId) {
-    const first = [...state.windows.values()].sort((a, b) => a.index - b.index)[0];
-    if (first) {
-      state.selectedWindowId = first.id;
-    }
-  }
-
-  renderTabs();
-  renderPanes();
-}
-
-function requestModelSync() {
-  sendArgv(["list-windows", "-F", "__WMUX___win\t#{window_id}\t#{window_index}\t#{window_name}"]);
-  sendArgv(["list-panes", "-a", "-F", "__WMUX___pane\t#{pane_id}\t#{window_id}\t#{pane_index}\t#{pane_active}\t#{pane_left}\t#{pane_top}\t#{pane_width}\t#{pane_height}\t#{pane_title}"]);
-}
-
-function scheduleModelRefresh() {
-  if (state.refreshTimer) return;
-  state.refreshTimer = setTimeout(() => {
-    state.refreshTimer = null;
-    requestModelSync();
-  }, 120);
-}
-
-function renderTabs() {
-  const wins = [...state.windows.values()].sort((a, b) => a.index - b.index);
-  if (!wins.length) {
-    tabsEl.innerHTML = "";
-    return;
-  }
-  if (!state.selectedWindowId || !state.windows.has(state.selectedWindowId)) {
-    state.selectedWindowId = wins[0].id;
-  }
-
-  tabsEl.innerHTML = "";
-  for (const win of wins) {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "tab" + (win.id === state.selectedWindowId ? " active" : "");
-    btn.textContent = `${win.index}: ${win.name}`;
-    btn.addEventListener("click", () => {
-      state.selectedWindowId = win.id;
-      renderTabs();
-      renderPanes();
-    });
-
-    const kill = document.createElement("span");
-    kill.className = "kill";
-    kill.textContent = "×";
-    kill.title = "kill window";
-    kill.addEventListener("click", (ev) => {
-      ev.stopPropagation();
-      sendArgv(["kill-window", "-t", win.id]);
-    });
-
-    btn.appendChild(kill);
-    tabsEl.appendChild(btn);
-  }
-}
-
-function renderPanes() {
-  const panes = [...state.panes.values()]
-    .filter((p) => p.windowId === state.selectedWindowId)
-    .sort((a, b) => a.paneIndex - b.paneIndex);
-
-  for (const [id, bundle] of state.terminals) {
-    if (!panes.find((p) => p.id === id)) {
-      bundle.term.dispose();
-      bundle.node.remove();
-      state.terminals.delete(id);
-    }
-  }
-
-  if (!panes.length) {
-    paneGridEl.innerHTML = "";
-    state.terminals.clear();
+  const resolved = resolveTargetPane(targetToken, state.panes);
+  if (!resolved) {
+    console.warn(`pane not found: ${targetToken || "(missing in URL)"}`);
     return;
   }
 
-  const maxW = Math.max(...panes.map((p) => p.left + p.width));
-  const maxH = Math.max(...panes.map((p) => p.top + p.height));
-  paneGridEl.style.minWidth = `${maxW * 9 + 20}px`;
-  paneGridEl.style.minHeight = `${maxH * 19 + 28}px`;
-
-  for (const pane of panes) {
-    let bundle = state.terminals.get(pane.id);
-    if (!bundle) {
-      bundle = createPaneTerminal(pane);
-      state.terminals.set(pane.id, bundle);
-    }
-
-    bundle.node.classList.toggle("focused", pane.id === state.focusedPaneId);
-    bundle.node.style.left = `${pane.left * 9}px`;
-    bundle.node.style.top = `${pane.top * 19}px`;
-    bundle.node.style.width = `${pane.width * 9}px`;
-    bundle.node.style.height = `${pane.height * 19 + 24}px`;
-    bundle.label.textContent = `${pane.id} · ${pane.title || "pane"}`;
+  if (!state.termBundle) {
+    state.termBundle = createTerminal(resolved.id);
   }
 
-  schedulePaneResize();
+  if (state.currentPaneId !== resolved.id) {
+    state.currentPaneId = resolved.id;
+    state.termBundle.term.reset();
+    sendArgv(["capture-pane", "-p", "-e", "-t", resolved.id]);
+    sendArgv(["display-message", "-p", "-t", resolved.id, "__WMUX_CURSOR\t#{pane_cursor_x}\t#{pane_cursor_y}"]);
+    schedulePaneResize();
+  }
 }
 
-function createPaneTerminal(pane) {
+function resolveTargetPane(token, panes) {
+  if (!token) return null;
+  if (panes.has(token)) return panes.get(token);
+
+  const lower = token.toLowerCase();
+  for (const pane of panes.values()) {
+    if ((pane.name || "").toLowerCase() === lower) {
+      return pane;
+    }
+  }
+  return null;
+}
+
+function createTerminal(initialPaneId) {
+  terminalHostEl.innerHTML = "";
+
   const node = document.createElement("section");
   node.className = "pane";
-
-  const header = document.createElement("div");
-  header.className = "pane-header";
-  const label = document.createElement("span");
-  header.appendChild(label);
 
   const termNode = document.createElement("div");
   termNode.className = "term";
 
-  node.appendChild(header);
   node.appendChild(termNode);
-  paneGridEl.appendChild(node);
+  terminalHostEl.appendChild(node);
 
   const term = new Terminal({
     convertEol: false,
@@ -282,23 +177,14 @@ function createPaneTerminal(pane) {
   term.loadAddon(fit);
   term.open(termNode);
   fit.fit();
-
-  node.addEventListener("mousedown", () => {
-    state.focusedPaneId = pane.id;
-    renderPanes();
-    term.focus();
-  });
+  term.focus();
 
   term.onData((data) => {
-    if (state.focusedPaneId !== pane.id) {
-      return;
-    }
-    sendInputData(pane.id, data);
+    if (!state.currentPaneId) return;
+    sendInputData(state.currentPaneId, data);
   });
 
-  sendArgv(["capture-pane", "-p", "-S", "-2000", "-E", "-", "-t", pane.id]);
-
-  return { node, term, fit, label, paneId: pane.id };
+  return { node, term, fit };
 }
 
 function sendInputData(paneId, data) {
@@ -309,41 +195,37 @@ function sendInputData(paneId, data) {
 }
 
 function sendKeyStroke(paneId, ch) {
-  if (ch === "\u001b") {
-    sendArgv(["send-keys", "-t", paneId, "Escape"]);
-    return;
-  }
-  if (ch === "\r" || ch === "\n") {
-    sendArgv(["send-keys", "-t", paneId, "Enter"]);
-    return;
-  }
-  if (ch === " ") {
-    sendArgv(["send-keys", "-t", paneId, "Space"]);
-    return;
-  }
-  if (ch === "\t") {
-    sendArgv(["send-keys", "-t", paneId, "Tab"]);
-    return;
-  }
-  if (ch === "\u007f") {
-    sendArgv(["send-keys", "-t", paneId, "BSpace"]);
-    return;
-  }
+  if (ch === "\u001b") return sendArgv(["send-keys", "-t", paneId, "Escape"]);
+  if (ch === "\r" || ch === "\n") return sendArgv(["send-keys", "-t", paneId, "Enter"]);
+  if (ch === " ") return sendArgv(["send-keys", "-t", paneId, "Space"]);
+  if (ch === "\t") return sendArgv(["send-keys", "-t", paneId, "Tab"]);
+  if (ch === "\u007f") return sendArgv(["send-keys", "-t", paneId, "BSpace"]);
   sendArgv(["send-keys", "-t", paneId, "-l", ch]);
 }
 
+function requestModelSync() {
+  sendArgv(["list-panes", "-a", "-F", "__WMUX___pane\t#{pane_id}\t#{window_id}\t#{pane_index}\t#{pane_active}\t#{pane_left}\t#{pane_top}\t#{pane_width}\t#{pane_height}\t#{pane_title}"]);
+}
+
+function scheduleModelRefresh() {
+  if (state.refreshTimer) return;
+  state.refreshTimer = setTimeout(() => {
+    state.refreshTimer = null;
+    requestModelSync();
+  }, 120);
+}
+
 function schedulePaneResize() {
+  if (!state.termBundle || !state.currentPaneId) return;
   if (state.resizeTimer) clearTimeout(state.resizeTimer);
   state.resizeTimer = setTimeout(() => {
     state.resizeTimer = null;
-    for (const [paneId, bundle] of state.terminals) {
-      bundle.fit.fit();
-      const { cols, rows } = bundle.term;
-      if (cols > 0 && rows > 0) {
-        sendArgv(["resize-pane", "-t", paneId, "-x", String(cols), "-y", String(rows)]);
-      }
+    state.termBundle.fit.fit();
+    const { cols, rows } = state.termBundle.term;
+    if (cols > 0 && rows > 0) {
+      sendArgv(["resize-pane", "-t", state.currentPaneId, "-x", String(cols), "-y", String(rows)]);
     }
-  }, 180);
+  }, 120);
 }
 
 function sendArgv(argv) {
@@ -351,14 +233,10 @@ function sendArgv(argv) {
   state.ws.send(JSON.stringify({ t: "cmd", argv }));
 }
 
-function setStatus(msg) {
-  statusEl.textContent = msg;
-}
-
-function setError(msg) {
-  errorsEl.textContent = msg;
-}
-
-function clearError() {
-  errorsEl.textContent = "";
+function normalizeSnapshotData(raw) {
+  const lines = raw.split("\n");
+  while (lines.length > 0 && lines[lines.length - 1] === "") {
+    lines.pop();
+  }
+  return lines.join("\n");
 }
