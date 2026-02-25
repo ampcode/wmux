@@ -1,8 +1,10 @@
 const terminalHostEl = document.getElementById("terminal-host");
+const terminalRenderer = parseTerminalRenderer(location.search);
 
 const initialTargetPaneId = parseTargetPaneId(location.pathname);
 
 const state = {
+  terminalRuntime: null,
   ws: null,
   panes: new Map(),
   targetPaneId: initialTargetPaneId,
@@ -12,13 +14,60 @@ const state = {
   refreshTimer: null,
 };
 
-connect();
-window.addEventListener("resize", schedulePaneResize);
+boot();
+
+async function boot() {
+  state.terminalRuntime = await loadTerminalRuntime(terminalRenderer);
+  connect();
+  window.addEventListener("resize", schedulePaneResize);
+}
 
 function parseTargetPaneId(pathname) {
   const m = pathname.match(/^\/p\/([^/]+)$/);
   if (!m) return "";
   return normalizePublicPaneId(m[1]);
+}
+
+function parseTerminalRenderer(search) {
+  const params = new URLSearchParams(search);
+  const value = (params.get("term") || "").trim().toLowerCase();
+  return value === "ghostty" ? "ghostty" : "xterm";
+}
+
+async function loadTerminalRuntime(renderer) {
+  if (renderer === "ghostty") {
+    try {
+      const ghosttyModule = await import("/vendor/ghostty/ghostty-web.js");
+      const ghostty = await ghosttyModule.Ghostty.load("/vendor/ghostty/ghostty-vt.wasm");
+      return {
+        renderer: "ghostty",
+        createTerminal(options) {
+          return new ghosttyModule.Terminal({ ...options, ghostty });
+        },
+        createFitAddon() {
+          return new ghosttyModule.FitAddon();
+        },
+      };
+    } catch (err) {
+      console.warn("failed to initialize ghostty terminal backend, falling back to xterm", err);
+    }
+  }
+  return createXtermRuntime();
+}
+
+function createXtermRuntime() {
+  if (typeof Terminal !== "function" || !FitAddon?.FitAddon) {
+    throw new Error("xterm runtime is not available");
+  }
+  return {
+    renderer: "xterm",
+    createTerminal(options) {
+      return new Terminal(options);
+    },
+    createFitAddon() {
+      return new FitAddon.FitAddon();
+    },
+  };
 }
 
 function connect() {
@@ -69,6 +118,7 @@ function handleServerMessage(msg) {
   }
 
   if (msg.t === "tmux_state") {
+    if (!state.terminalRuntime) return;
     applyState(msg.state);
     return;
   }
@@ -128,7 +178,7 @@ function applyState(snapshot) {
     resolved = resolveFallbackPane(state.panes);
     if (resolved) {
       state.targetPaneId = resolved.paneId;
-      history.replaceState(null, "", `/p/${encodeURIComponent(resolved.paneId)}`);
+      history.replaceState(null, "", paneURLFor(resolved.paneId));
     }
   }
 
@@ -177,15 +227,14 @@ function createTerminal() {
   node.appendChild(termNode);
   terminalHostEl.appendChild(node);
 
-  const term = new Terminal({
+  const term = state.terminalRuntime.createTerminal({
     convertEol: false,
     fontFamily: '"JetBrains Mono NF", "JetBrains Mono", Menlo, monospace',
     fontSize: 13,
     scrollback: 10000,
-    allowTransparency: true,
     cursorBlink: true,
   });
-  const fit = new FitAddon.FitAddon();
+  const fit = state.terminalRuntime.createFitAddon();
   term.loadAddon(fit);
   term.open(termNode);
   fit.fit();
@@ -218,6 +267,11 @@ function sendKeyStroke(tmuxPaneId, ch) {
 
 function requestModelSync() {
   sendArgv(["list-panes", "-a", "-F", "__WMUX___pane\t#{session_name}\t#{pane_id}\t#{window_id}\t#{pane_index}\t#{pane_active}\t#{pane_left}\t#{pane_top}\t#{pane_width}\t#{pane_height}\t#{pane_current_command}\t#{pane_title}"]);
+}
+
+function paneURLFor(paneId) {
+  const query = location.search || "";
+  return `/p/${encodeURIComponent(paneId)}${query}`;
 }
 
 function scheduleModelRefresh() {
