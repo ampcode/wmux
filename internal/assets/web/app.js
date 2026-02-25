@@ -237,6 +237,10 @@ function createTerminal() {
   const fit = state.terminalRuntime.createFitAddon();
   term.loadAddon(fit);
   term.open(termNode);
+  if (state.terminalRuntime.renderer === "ghostty") {
+    // ghostty-web makes the host contenteditable for keyboard input; hide the browser caret.
+    termNode.style.caretColor = "transparent";
+  }
   fit.fit();
   term.focus();
 
