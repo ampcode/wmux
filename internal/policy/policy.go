@@ -12,7 +12,7 @@ type Policy struct {
 func Default() Policy {
 	return Policy{allowed: map[string]struct{}{
 		"send-keys":       {},
-		"resize-pane":     {},
+		"refresh-client":  {},
 		"kill-window":     {},
 		"list-windows":    {},
 		"list-panes":      {},

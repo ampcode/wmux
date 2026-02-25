@@ -228,7 +228,7 @@ test('headless flow covers state, pane attach, input mapping, and resize', async
   await expect
     .poll(async () => {
       const messages = await page.evaluate(() => window.__wmuxSent.map((m) => m.argv || []));
-      return messages.some((argv) => argv[0] === 'resize-pane' && argv.includes('-x') && argv.includes('-y'));
+      return messages.some((argv) => argv[0] === 'refresh-client' && argv.includes('-C'));
     })
     .toBeTruthy();
 });

@@ -211,7 +211,8 @@ function schedulePaneResize() {
     state.termBundle.fit.fit();
     const { cols, rows } = state.termBundle.term;
     if (cols > 0 && rows > 0) {
-      sendArgv(["resize-pane", "-t", state.currentPaneId, "-x", String(cols), "-y", String(rows)]);
+      // Resize the tmux control-mode client itself so pane size tracks browser viewport.
+      sendArgv(["refresh-client", "-C", `${cols}x${rows}`]);
     }
   }, 120);
 }
