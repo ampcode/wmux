@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Install mise
+if ! command -v mise &>/dev/null; then
+  curl -fsSL https://mise.run | sh
+  export PATH="$HOME/.local/bin:$PATH"
+fi
+
+# Add mise activation to shell profiles
+MISE_ACTIVATE='eval "$($HOME/.local/bin/mise activate bash)"'
+for rc in "$HOME/.bashrc" "$HOME/.profile"; do
+  if ! grep -qF 'mise activate' "$rc" 2>/dev/null; then
+    echo "$MISE_ACTIVATE" >> "$rc"
+  fi
+done
+
+# Trust the repo config and install all tools (go, node, agent-browser)
+mise trust "$PWD/mise.toml"
+mise install
+
+# Activate mise so tools are on PATH
+eval "$(mise activate bash)"
+
+# Install npm dependencies (playwright etc.)
+npm ci
+
+# Install Playwright browsers
+npx playwright install chromium
+
+# Build the Go project
+go build ./...
+
+echo "Setup complete."
