@@ -195,6 +195,66 @@ func TestAPIStateReturnsStablePaneIDWithoutAbsolutePaneID(t *testing.T) {
 	}
 }
 
+func TestAPIDebugUnicodeCapturesLatestReport(t *testing.T) {
+	hub := wshub.New(policy.Default(), "webui")
+	tmux := &scriptedTmuxSender{hub: hub}
+	if err := hub.BindTmux(tmux); err != nil {
+		t.Fatalf("BindTmux: %v", err)
+	}
+	if err := hub.RequestStateSync(); err != nil {
+		t.Fatalf("RequestStateSync: %v", err)
+	}
+	waitForTargetPaneID(t, hub, "13")
+
+	h, err := NewServer(Config{Hub: hub})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	body := strings.NewReader(`{"renderer":"ghostty","url":"http://localhost/p/13?term=ghostty","user_agent":"ua","source":"pane_snapshot","pane_id":"13","data_length":32,"data_sample":"bad\ufffdchars"}`)
+	postReq := httptest.NewRequest(http.MethodPost, "/api/debug/unicode", body)
+	postReq.Header.Set("Content-Type", "application/json")
+	postRec := httptest.NewRecorder()
+	h.ServeHTTP(postRec, postReq)
+
+	if postRec.Code != http.StatusOK {
+		t.Fatalf("post status = %d, body = %s", postRec.Code, postRec.Body.String())
+	}
+
+	var postResp map[string]any
+	if err := json.Unmarshal(postRec.Body.Bytes(), &postResp); err != nil {
+		t.Fatalf("decode post response: %v", err)
+	}
+	if _, ok := postResp["report_id"]; !ok {
+		t.Fatalf("missing report_id in post response: %v", postResp)
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/debug/unicode", nil)
+	getRec := httptest.NewRecorder()
+	h.ServeHTTP(getRec, getReq)
+
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("get status = %d, body = %s", getRec.Code, getRec.Body.String())
+	}
+
+	var report unicodeDebugRecord
+	if err := json.Unmarshal(getRec.Body.Bytes(), &report); err != nil {
+		t.Fatalf("decode get response: %v", err)
+	}
+	if report.Client.PaneID != "13" {
+		t.Fatalf("client pane id = %q, want %q", report.Client.PaneID, "13")
+	}
+	if report.Server.TmuxPaneID != "%13" {
+		t.Fatalf("server tmux pane id = %q, want %q", report.Server.TmuxPaneID, "%13")
+	}
+	if report.Server.PlainSample != "plain-line" {
+		t.Fatalf("plain sample = %q, want %q", report.Server.PlainSample, "plain-line")
+	}
+	if report.Server.EscapedSample != "\u001b[31mred\u001b[0m" {
+		t.Fatalf("escaped sample = %q, want escape-decorated output", report.Server.EscapedSample)
+	}
+}
+
 func waitForTargetPaneID(t *testing.T, hub *wshub.Hub, paneID string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)

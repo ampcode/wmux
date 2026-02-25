@@ -1,6 +1,7 @@
 package wshub
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ampcode/wmux/internal/policy"
 	"github.com/ampcode/wmux/internal/tmuxparse"
@@ -30,6 +32,8 @@ type Hub struct {
 
 	mu      sync.RWMutex
 	clients map[*client]struct{}
+
+	outputUTF8Carry map[string][]byte
 }
 
 type PaneInfo struct {
@@ -115,11 +119,12 @@ var safeBareToken = regexp.MustCompile(`^[A-Za-z0-9_@%:./+\-]+$`)
 
 func New(p policy.Policy, targetSession string) *Hub {
 	h := &Hub{
-		policy:        p,
-		clients:       map[*client]struct{}{},
-		model:         newModelState(),
-		pending:       []pendingCommand{},
-		targetSession: targetSession,
+		policy:          p,
+		clients:         map[*client]struct{}{},
+		model:           newModelState(),
+		pending:         []pendingCommand{},
+		targetSession:   targetSession,
+		outputUTF8Carry: map[string][]byte{},
 	}
 	h.resetParser()
 	return h
@@ -350,9 +355,13 @@ func (h *Hub) consumeParserEvents(parser *tmuxparse.StreamParser) {
 			}
 		case tmuxparse.Notification:
 			if (e.Name == "output" || e.Name == "extended-output") && len(e.Args) >= 1 {
+				decoded := h.decodePaneOutputData(e.Args[0], e.Value)
+				if decoded == "" {
+					continue
+				}
 				h.broadcast(serverMsg{T: "pane_output", PaneOutput: &paneOutputPayload{
 					PaneID: e.Args[0],
-					Data:   tmuxparse.DecodeEscapedValue(e.Value),
+					Data:   decoded,
 				}})
 				continue
 			}
@@ -366,6 +375,45 @@ func (h *Hub) consumeParserEvents(parser *tmuxparse.StreamParser) {
 			h.broadcast(serverMsg{T: "error", Message: "tmux parse error: " + e.Error()})
 		}
 	}
+}
+
+func (h *Hub) decodePaneOutputData(paneID, value string) string {
+	raw := []byte(tmuxparse.DecodeEscapedValue(value))
+	if len(raw) == 0 {
+		return ""
+	}
+
+	if carry := h.outputUTF8Carry[paneID]; len(carry) > 0 {
+		raw = append(append([]byte{}, carry...), raw...)
+	}
+
+	decoded, carry := splitUTF8AtSafeBoundary(raw)
+	if len(carry) > 0 {
+		h.outputUTF8Carry[paneID] = carry
+	} else {
+		delete(h.outputUTF8Carry, paneID)
+	}
+	return string(decoded)
+}
+
+func splitUTF8AtSafeBoundary(raw []byte) ([]byte, []byte) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	if utf8.Valid(raw) {
+		return raw, nil
+	}
+
+	for cut := 1; cut <= 3 && cut <= len(raw); cut++ {
+		prefix := raw[:len(raw)-cut]
+		if utf8.Valid(prefix) {
+			return prefix, append([]byte{}, raw[len(raw)-cut:]...)
+		}
+	}
+
+	// If invalid bytes are not just a trailing partial rune, replace invalid
+	// sequences to keep downstream JSON emission stable.
+	return bytes.ToValidUTF8(raw, []byte("\uFFFD")), nil
 }
 
 func (h *Hub) addClient(c *client) {

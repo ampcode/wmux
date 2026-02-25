@@ -7,6 +7,10 @@ const state = {
   terminalRuntime: null,
   ws: null,
   panes: new Map(),
+  debug: {
+    recentMessages: [],
+    lastUnicodeReportAtMs: 0,
+  },
   targetPaneId: initialTargetPaneId,
   currentPaneId: null,
   termBundle: null,
@@ -90,6 +94,7 @@ function connect() {
     } catch {
       return;
     }
+    recordRecentServerMessage(msg);
     handleServerMessage(msg);
   });
 }
@@ -126,6 +131,7 @@ function handleServerMessage(msg) {
   if (msg.t === "pane_snapshot") {
     const snap = msg.pane_snapshot;
     if (!snap || normalizePublicPaneId(snap.pane_id) !== state.currentPaneId || !state.termBundle) return;
+    maybeReportUnicodeIssue("pane_snapshot", snap.pane_id, snap.data || "");
     state.termBundle.term.reset();
     const seeded = normalizeSnapshotData(snap.data || "").replace(/\n/g, "\r\n");
     state.termBundle.term.write(seeded);
@@ -144,6 +150,7 @@ function handleServerMessage(msg) {
   if (msg.t === "pane_output") {
     const out = msg.pane_output;
     if (!out || normalizePublicPaneId(out.pane_id) !== state.currentPaneId || !state.termBundle) return;
+    maybeReportUnicodeIssue("pane_output", out.pane_id, out.data || "");
     state.termBundle.term.write(out.data || "");
     return;
   }
@@ -298,6 +305,65 @@ function schedulePaneResize() {
       sendArgv(["refresh-client", "-C", `${cols}x${rows}`]);
     }
   }, 120);
+}
+
+function recordRecentServerMessage(msg) {
+  const entry = {
+    at: new Date().toISOString(),
+    type: String(msg?.t || ""),
+  };
+  if (msg.t === "pane_output") {
+    entry.pane_id = normalizePublicPaneId(msg?.pane_output?.pane_id || "");
+    entry.length = String(msg?.pane_output?.data || "").length;
+    entry.preview = String(msg?.pane_output?.data || "").slice(0, 120);
+  }
+  if (msg.t === "pane_snapshot") {
+    entry.pane_id = normalizePublicPaneId(msg?.pane_snapshot?.pane_id || "");
+    entry.length = String(msg?.pane_snapshot?.data || "").length;
+    entry.preview = String(msg?.pane_snapshot?.data || "").slice(0, 120);
+  }
+  state.debug.recentMessages.push(entry);
+  if (state.debug.recentMessages.length > 50) {
+    state.debug.recentMessages = state.debug.recentMessages.slice(-50);
+  }
+}
+
+function maybeReportUnicodeIssue(source, paneID, data) {
+  if (!data) return;
+  const hasReplacement = data.includes("\uFFFD");
+  const hasCharsetShift = data.includes("\u000e") || data.includes("\u000f") || data.includes("\u001b(0") || data.includes("\u001b(B");
+  const reason = hasReplacement ? "replacement_char" : hasCharsetShift ? "charset_shift_sequence" : "";
+  if (!reason) return;
+  const now = Date.now();
+  if (now-state.debug.lastUnicodeReportAtMs < 3000) return;
+  state.debug.lastUnicodeReportAtMs = now;
+
+  const payload = {
+    renderer: state.terminalRuntime?.renderer || terminalRenderer,
+    reason,
+    url: location.href,
+    user_agent: navigator.userAgent,
+    source,
+    pane_id: normalizePublicPaneId(paneID),
+    current_pane_id: state.currentPaneId,
+    target_pane_id: state.targetPaneId,
+    data_length: data.length,
+    data_sample: data.slice(0, 1200),
+    recent_messages: state.debug.recentMessages.slice(-20),
+  };
+
+  fetch("/api/debug/unicode", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+    .then((res) => res.json())
+    .then((result) => {
+      console.warn("unicode diagnostic captured", result);
+    })
+    .catch((err) => {
+      console.warn("unicode diagnostic capture failed", err);
+    });
 }
 
 function sendArgv(argv) {

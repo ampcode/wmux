@@ -1,6 +1,9 @@
 package wshub
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+)
 
 func TestFilterStateToTargetSession(t *testing.T) {
 	state := statePayload{
@@ -73,5 +76,38 @@ func TestParsePaneCursorOutput(t *testing.T) {
 	}
 	if c.X != 12 || c.Y != 7 {
 		t.Fatalf("unexpected cursor values: %#v", c)
+	}
+}
+
+func TestSplitUTF8AtSafeBoundaryKeepsTrailingPartialRune(t *testing.T) {
+	// U+2500 BOX DRAWINGS LIGHT HORIZONTAL (e2 94 80), split after first byte.
+	partial := []byte{0xe2}
+	out, carry := splitUTF8AtSafeBoundary(partial)
+	if len(out) != 0 {
+		t.Fatalf("expected no decoded bytes, got %q", string(out))
+	}
+	if !bytes.Equal(carry, partial) {
+		t.Fatalf("carry mismatch: got=%v want=%v", carry, partial)
+	}
+
+	completed, rem := splitUTF8AtSafeBoundary(append(carry, []byte{0x94, 0x80}...))
+	if rem != nil {
+		t.Fatalf("expected empty carry, got %v", rem)
+	}
+	if got := string(completed); got != "─" {
+		t.Fatalf("decoded rune mismatch: got=%q want=%q", got, "─")
+	}
+}
+
+func TestDecodePaneOutputDataCarriesAcrossChunks(t *testing.T) {
+	h := &Hub{outputUTF8Carry: map[string][]byte{}}
+
+	part1 := h.decodePaneOutputData("%1", "\\342")
+	if part1 != "" {
+		t.Fatalf("expected first chunk to be buffered, got %q", part1)
+	}
+	part2 := h.decodePaneOutputData("%1", "\\224\\200")
+	if part2 != "─" {
+		t.Fatalf("decoded chunk mismatch: got=%q want=%q", part2, "─")
 	}
 }
