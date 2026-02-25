@@ -221,13 +221,13 @@ func (s *scriptedTmuxSender) Send(line string) error {
 			s.hub.BroadcastTmuxStdoutLine("__WMUX___pane\twebui\t%13\t@1\t0\t1\t0\t0\t120\t40\tbash\tbash")
 			s.hub.BroadcastTmuxStdoutLine("%end 1 1 0")
 		}()
-	case line == "capture-pane -p -t %13":
+	case line == "capture-pane -p -N -t %13":
 		go func() {
 			s.hub.BroadcastTmuxStdoutLine("%begin 2 2 0")
 			s.hub.BroadcastTmuxStdoutLine("plain-line")
 			s.hub.BroadcastTmuxStdoutLine("%end 2 2 0")
 		}()
-	case line == "capture-pane -p -e -t %13":
+	case line == "capture-pane -p -e -N -t %13":
 		go func() {
 			s.hub.BroadcastTmuxStdoutLine("%begin 3 3 0")
 			s.hub.BroadcastTmuxStdoutLine("\u001b[31mred\u001b[0m")

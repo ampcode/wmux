@@ -130,7 +130,7 @@ function applyState(snapshot) {
   if (state.currentPaneId !== resolved.id) {
     state.currentPaneId = resolved.id;
     state.termBundle.term.reset();
-    sendArgv(["capture-pane", "-p", "-e", "-t", resolved.id]);
+    sendArgv(["capture-pane", "-p", "-e", "-N", "-t", resolved.id]);
     sendArgv(["display-message", "-p", "-t", resolved.id, "__WMUX_CURSOR\t#{pane_cursor_x}\t#{pane_cursor_y}"]);
     schedulePaneResize();
   }

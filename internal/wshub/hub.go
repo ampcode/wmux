@@ -220,9 +220,9 @@ func (h *Hub) CapturePaneContent(paneID string, withEscapes bool) (string, error
 		return "", fmt.Errorf("pane id is required")
 	}
 
-	argv := []string{"capture-pane", "-p", "-t", paneID}
+	argv := []string{"capture-pane", "-p", "-N", "-t", paneID}
 	if withEscapes {
-		argv = []string{"capture-pane", "-p", "-e", "-t", paneID}
+		argv = []string{"capture-pane", "-p", "-e", "-N", "-t", paneID}
 	}
 
 	res, err := h.runCommandAndWait(argv, 5*time.Second, false)
