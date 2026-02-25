@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/ampcode/wmux/internal/assets"
@@ -95,7 +94,7 @@ func serveAPIState(w http.ResponseWriter, r *http.Request, hub *wshub.Hub) {
 		for _, pane := range panes {
 			title := pane.Name
 			if strings.TrimSpace(title) == "" {
-				title = fmt.Sprintf("pane %d", pane.Pane)
+				title = fmt.Sprintf("pane %s", pane.PaneID)
 			}
 			rows = append(rows, struct {
 				Title string
@@ -104,7 +103,7 @@ func serveAPIState(w http.ResponseWriter, r *http.Request, hub *wshub.Hub) {
 			}{
 				Title: title,
 				Size:  fmt.Sprintf("%dx%d", pane.Width, pane.Height),
-				Href:  paneTargetHref(pane.Pane),
+				Href:  paneTargetHref(pane.PaneID),
 			})
 		}
 		_ = stateHTMLTemplate.Execute(w, struct {
@@ -129,20 +128,20 @@ func serveAPIContents(w http.ResponseWriter, r *http.Request, hub *wshub.Hub) {
 		return
 	}
 
-	paneNumber, ok := parsePaneNumberPath(r.URL.EscapedPath(), "/api/contents/")
+	paneID, ok := parsePanePathID(r.URL.EscapedPath(), "/api/contents/")
 	if !ok {
 		http.NotFound(w, r)
 		return
 	}
 
-	paneID, found := hub.TargetSessionPaneIDByNumber(paneNumber)
+	tmuxPaneID, found := hub.TargetSessionPaneIDByPublicID(paneID)
 	if !found {
 		http.Error(w, "pane not found", http.StatusNotFound)
 		return
 	}
 
 	withEscapes := parseEscapesFlag(r)
-	content, err := hub.CapturePaneContent(paneID, withEscapes)
+	content, err := hub.CapturePaneContent(tmuxPaneID, withEscapes)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -165,28 +164,28 @@ func firstTargetPaneHref(hub *wshub.Hub) (string, bool) {
 	if len(panes) == 0 {
 		return "", false
 	}
-	firstPane := panes[0].Pane
+	firstPane := panes[0]
 	for _, pane := range panes[1:] {
-		if pane.Pane < firstPane {
-			firstPane = pane.Pane
+		if pane.PaneIndex < firstPane.PaneIndex {
+			firstPane = pane
 		}
 	}
-	return paneTargetHref(firstPane), true
+	return paneTargetHref(firstPane.PaneID), true
 }
 
-func parsePaneNumberPath(escapedPath, prefix string) (int, bool) {
+func parsePanePathID(escapedPath, prefix string) (string, bool) {
 	if !strings.HasPrefix(escapedPath, prefix) {
-		return 0, false
+		return "", false
 	}
 	raw := strings.TrimPrefix(escapedPath, prefix)
 	if raw == "" || strings.Contains(raw, "/") {
-		return 0, false
+		return "", false
 	}
-	n, err := strconv.Atoi(raw)
-	if err != nil || n < 0 {
-		return 0, false
+	id := strings.TrimSpace(raw)
+	if id == "" || strings.HasPrefix(id, "%") {
+		return "", false
 	}
-	return n, true
+	return id, true
 }
 
 func parseEscapesFlag(r *http.Request) bool {
@@ -194,8 +193,8 @@ func parseEscapesFlag(r *http.Request) bool {
 	return v == "1" || v == "true" || v == "yes"
 }
 
-func paneTargetHref(paneNumber int) string {
-	return fmt.Sprintf("/p/%d", paneNumber)
+func paneTargetHref(paneID string) string {
+	return fmt.Sprintf("/p/%s", paneID)
 }
 
 func negotiateStateFormat(r *http.Request) string {

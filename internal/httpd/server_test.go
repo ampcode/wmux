@@ -12,8 +12,8 @@ import (
 	"github.com/ampcode/wmux/internal/wshub"
 )
 
-func TestPaneTargetHrefUsesPaneNumberPath(t *testing.T) {
-	got := paneTargetHref(13)
+func TestPaneTargetHrefUsesPaneIDPath(t *testing.T) {
+	got := paneTargetHref("13")
 	if got != "/p/13" {
 		t.Fatalf("paneTargetHref(13) = %q, want %q", got, "/p/13")
 	}
@@ -28,7 +28,7 @@ func TestRootRedirectsToFirstPane(t *testing.T) {
 	if err := hub.RequestStateSync(); err != nil {
 		t.Fatalf("RequestStateSync: %v", err)
 	}
-	waitForTargetPaneNumber(t, hub, 0)
+	waitForTargetPaneID(t, hub, "13")
 
 	h, err := NewServer(Config{Hub: hub})
 	if err != nil {
@@ -42,8 +42,8 @@ func TestRootRedirectsToFirstPane(t *testing.T) {
 	if rec.Code != http.StatusFound {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	if got := rec.Header().Get("Location"); got != "/p/0" {
-		t.Fatalf("location = %q, want %q", got, "/p/0")
+	if got := rec.Header().Get("Location"); got != "/p/13" {
+		t.Fatalf("location = %q, want %q", got, "/p/13")
 	}
 }
 
@@ -76,14 +76,14 @@ func TestAPIContentsReturnsRawPlainPaneContents(t *testing.T) {
 	if err := hub.RequestStateSync(); err != nil {
 		t.Fatalf("RequestStateSync: %v", err)
 	}
-	waitForTargetPaneNumber(t, hub, 0)
+	waitForTargetPaneID(t, hub, "13")
 
 	h, err := NewServer(Config{Hub: hub})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/contents/0", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/contents/13", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -107,14 +107,14 @@ func TestAPIContentsReturnsRawEscapedPaneContents(t *testing.T) {
 	if err := hub.RequestStateSync(); err != nil {
 		t.Fatalf("RequestStateSync: %v", err)
 	}
-	waitForTargetPaneNumber(t, hub, 0)
+	waitForTargetPaneID(t, hub, "13")
 
 	h, err := NewServer(Config{Hub: hub})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/contents/0?escapes=1", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/contents/13?escapes=1", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -138,7 +138,7 @@ func TestAPIContentsReturnsNotFoundForUnknownPane(t *testing.T) {
 	if err := hub.RequestStateSync(); err != nil {
 		t.Fatalf("RequestStateSync: %v", err)
 	}
-	waitForTargetPaneNumber(t, hub, 0)
+	waitForTargetPaneID(t, hub, "13")
 
 	h, err := NewServer(Config{Hub: hub})
 	if err != nil {
@@ -154,7 +154,7 @@ func TestAPIContentsReturnsNotFoundForUnknownPane(t *testing.T) {
 	}
 }
 
-func TestAPIStateReturnsPaneNumberNotAbsolutePaneID(t *testing.T) {
+func TestAPIStateReturnsStablePaneIDWithoutAbsolutePaneID(t *testing.T) {
 	hub := wshub.New(policy.Default(), "webui")
 	tmux := &scriptedTmuxSender{hub: hub}
 	if err := hub.BindTmux(tmux); err != nil {
@@ -163,7 +163,7 @@ func TestAPIStateReturnsPaneNumberNotAbsolutePaneID(t *testing.T) {
 	if err := hub.RequestStateSync(); err != nil {
 		t.Fatalf("RequestStateSync: %v", err)
 	}
-	waitForTargetPaneNumber(t, hub, 0)
+	waitForTargetPaneID(t, hub, "13")
 
 	h, err := NewServer(Config{Hub: hub})
 	if err != nil {
@@ -187,26 +187,26 @@ func TestAPIStateReturnsPaneNumberNotAbsolutePaneID(t *testing.T) {
 	if len(payload.Panes) == 0 {
 		t.Fatalf("expected at least one pane")
 	}
-	if _, ok := payload.Panes[0]["pane"]; !ok {
-		t.Fatalf("pane number field missing: %v", payload.Panes[0])
+	if got, ok := payload.Panes[0]["pane_id"]; !ok || got != "13" {
+		t.Fatalf("stable pane id missing or unexpected: %v", payload.Panes[0])
 	}
 	if _, ok := payload.Panes[0]["id"]; ok {
 		t.Fatalf("unexpected absolute pane id field present: %v", payload.Panes[0])
 	}
 }
 
-func waitForTargetPaneNumber(t *testing.T, hub *wshub.Hub, paneNumber int) {
+func waitForTargetPaneID(t *testing.T, hub *wshub.Hub, paneID string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		for _, pane := range hub.CurrentTargetSessionPaneInfos() {
-			if pane.Pane == paneNumber {
+			if pane.PaneID == paneID {
 				return
 			}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("pane %d did not appear in target session state", paneNumber)
+	t.Fatalf("pane %s did not appear in target session state", paneID)
 }
 
 type scriptedTmuxSender struct {

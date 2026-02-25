@@ -68,7 +68,7 @@ const skipReason = `missing required commands: ${missing.join(', ')}`;
 
 let sessionName;
 let paneId;
-let paneNumber;
+let publicPaneId;
 let port;
 let baseURL;
 let wmuxProc;
@@ -79,7 +79,7 @@ test.beforeAll(async () => {
   const nonce = `${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
   sessionName = `wmux-e2e-${nonce}`;
   paneId = sh('bash', ['./scripts/setup-e2e-tmux-fixture.sh', sessionName]);
-  paneNumber = Number(sh('tmux', ['display-message', '-p', '-t', paneId, '#{pane_index}']));
+  publicPaneId = paneId.replace(/^%/, '');
 
   port = await getFreePort();
   baseURL = `http://127.0.0.1:${port}`;
@@ -112,7 +112,7 @@ test.beforeAll(async () => {
       const body = await res.json();
       return (
         Array.isArray(body.panes) &&
-        body.panes.some((p) => p.pane === paneNumber && p.session_name === sessionName)
+        body.panes.some((p) => p.pane_id === publicPaneId && p.session_name === sessionName)
       );
     } catch {
       return false;
@@ -161,17 +161,17 @@ test('headless flow covers state, pane attach, input mapping, and resize', async
   expect(stateRes.ok()).toBeTruthy();
   const state = await stateRes.json();
   expect(Array.isArray(state.panes)).toBeTruthy();
-  expect(state.panes.some((p) => p.pane === paneNumber)).toBeTruthy();
+  expect(state.panes.some((p) => p.pane_id === publicPaneId)).toBeTruthy();
 
   const stateHTML = await request.get(`${baseURL}/api/state.html`);
   expect(stateHTML.ok()).toBeTruthy();
-  await expect(stateHTML.text()).resolves.toContain(`/p/${paneNumber}`);
+  await expect(stateHTML.text()).resolves.toContain(`/p/${publicPaneId}`);
 
   const browserLogs = [];
   page.on('console', (msg) => browserLogs.push(`[console:${msg.type()}] ${msg.text()}`));
   page.on('pageerror', (err) => browserLogs.push(`[pageerror] ${err.message}`));
 
-  await page.goto(`${baseURL}/p/${paneNumber}`);
+  await page.goto(`${baseURL}/p/${publicPaneId}`);
   const termReady = await waitFor(async () => {
     const count = await page.locator('#terminal-host .term').count();
     return count > 0;

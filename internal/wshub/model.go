@@ -20,7 +20,7 @@ type windowPayload struct {
 }
 
 type panePayload struct {
-	ID          string `json:"id"`
+	ID          string `json:"pane_id"`
 	Name        string `json:"name"`
 	SessionName string `json:"session_name"`
 	WindowID    string `json:"window_id"`

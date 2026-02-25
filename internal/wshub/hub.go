@@ -33,12 +33,13 @@ type Hub struct {
 }
 
 type PaneInfo struct {
-	Pane        int    `json:"pane"`
+	PaneID      string `json:"pane_id"`
+	PaneIndex   int    `json:"pane_index"`
 	Name        string `json:"name"`
 	SessionName string `json:"session_name"`
 	Width       int    `json:"width"`
 	Height      int    `json:"height"`
-	ID          string `json:"-"`
+	TmuxPaneID  string `json:"-"`
 }
 
 type client struct {
@@ -194,8 +195,9 @@ func (h *Hub) CurrentTargetSessionPaneInfos() []PaneInfo {
 	out := make([]PaneInfo, 0, len(panes))
 	for _, pane := range panes {
 		out = append(out, PaneInfo{
-			Pane:        pane.PaneIndex,
-			ID:          pane.ID,
+			PaneID:      publicPaneID(pane.ID),
+			PaneIndex:   pane.PaneIndex,
+			TmuxPaneID:  pane.ID,
 			Name:        pane.Name,
 			SessionName: pane.SessionName,
 			Width:       pane.Width,
@@ -205,13 +207,21 @@ func (h *Hub) CurrentTargetSessionPaneInfos() []PaneInfo {
 	return out
 }
 
-func (h *Hub) TargetSessionPaneIDByNumber(paneNumber int) (string, bool) {
+func (h *Hub) TargetSessionPaneIDByPublicID(paneID string) (string, bool) {
+	normalized := publicPaneID(paneID)
+	if normalized == "" {
+		return "", false
+	}
 	for _, pane := range h.CurrentTargetSessionPaneInfos() {
-		if pane.Pane == paneNumber {
-			return pane.ID, true
+		if pane.PaneID == normalized {
+			return pane.TmuxPaneID, true
 		}
 	}
 	return "", false
+}
+
+func publicPaneID(tmuxPaneID string) string {
+	return strings.TrimPrefix(strings.TrimSpace(tmuxPaneID), "%")
 }
 
 func (h *Hub) CapturePaneContent(paneID string, withEscapes bool) (string, error) {
