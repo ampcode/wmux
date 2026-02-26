@@ -23,7 +23,7 @@ tmux new-session -d -s webui
 go run ./cmd/wmux
 ```
 
-By default it listens on `127.0.0.1:8080` and targets session `webui`.
+By default it listens on `127.0.0.1:8080`, targets session `webui`, and uses `ghostty` as the terminal renderer.
 
 3. Open pane links in your browser:
 
@@ -56,6 +56,7 @@ go run ./cmd/wmux --tmux-bin /opt/homebrew/bin/tmux
 - `--target-session` (default `webui`; the only tmux session wmux manages and serves)
 - `--static-dir` (optional override for web assets)
 - `--tmux-bin` (default `tmux`)
+- `--term` (default `ghostty`; accepted values: `ghostty`, `xterm`)
 - `--restart-backoff` (default `500ms`)
 - `--restart-max-backoff` (default `10s`)
 
@@ -67,6 +68,7 @@ Every flag can be provided by env var:
 - `WMUX_TARGET_SESSION`
 - `WMUX_STATIC_DIR`
 - `WMUX_TMUX_BIN`
+- `WMUX_TERM`
 - `WMUX_RESTART_BACKOFF`
 - `WMUX_RESTART_MAX_BACKOFF`
 

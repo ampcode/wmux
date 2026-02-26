@@ -35,7 +35,7 @@ function parseTargetPaneId(pathname) {
 function parseTerminalRenderer(search) {
   const params = new URLSearchParams(search);
   const value = (params.get("term") || "").trim().toLowerCase();
-  return value === "ghostty" ? "ghostty" : "xterm";
+  return value === "xterm" ? "xterm" : "ghostty";
 }
 
 async function loadTerminalRuntime(renderer) {

@@ -8,7 +8,7 @@ This document describes what the codebase currently implements.
 
 Current UI scope:
 
-- Single full-screen xterm.js terminal per browser page.
+- Single full-screen terminal per browser page (`ghostty` by default, `xterm` optional via `term` query param).
 - Page targets exactly one pane (from URL path `/p/<n>`).
 - Multiple web clients are supported concurrently.
 
@@ -25,6 +25,7 @@ Flags (with env var equivalents):
 - `--target-session` (`WMUX_TARGET_SESSION`, default `webui`)
 - `--static-dir` (`WMUX_STATIC_DIR`, default embedded assets)
 - `--tmux-bin` (`WMUX_TMUX_BIN`, default `tmux`)
+- `--term` (`WMUX_TERM`, default `ghostty`; allowed: `ghostty`, `xterm`)
 - `--restart-backoff` (`WMUX_RESTART_BACKOFF`, default `500ms`)
 - `--restart-max-backoff` (`WMUX_RESTART_MAX_BACKOFF`, default `10s`)
 

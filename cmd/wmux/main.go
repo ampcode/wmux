@@ -24,6 +24,7 @@ type config struct {
 	targetSession  string
 	staticDir      string
 	tmuxBin        string
+	term           string
 	restartBackoff time.Duration
 	restartMax     time.Duration
 }
@@ -41,6 +42,7 @@ func parseConfig() config {
 	flag.StringVar(&cfg.targetSession, "target-session", envOr("WMUX_TARGET_SESSION", "webui"), "tmux session to ensure and serve")
 	flag.StringVar(&cfg.staticDir, "static-dir", envOr("WMUX_STATIC_DIR", ""), "optional static assets directory")
 	flag.StringVar(&cfg.tmuxBin, "tmux-bin", envOr("WMUX_TMUX_BIN", "tmux"), "path to tmux binary")
+	flag.StringVar(&cfg.term, "term", envOr("WMUX_TERM", "ghostty"), "default terminal renderer for generated pane links (ghostty or xterm)")
 	flag.DurationVar(&cfg.restartBackoff, "restart-backoff", durationEnvOr("WMUX_RESTART_BACKOFF", 500*time.Millisecond), "restart backoff base")
 	flag.DurationVar(&cfg.restartMax, "restart-max-backoff", durationEnvOr("WMUX_RESTART_MAX_BACKOFF", 10*time.Second), "restart backoff max")
 	flag.Parse()
@@ -50,6 +52,11 @@ func parseConfig() config {
 func run(cfg config) error {
 	if strings.TrimSpace(cfg.targetSession) == "" {
 		return errors.New("--target-session cannot be empty")
+	}
+
+	cfg.term = normalizeDefaultTerm(cfg.term)
+	if cfg.term == "" {
+		return errors.New("--term must be one of: ghostty, xterm")
 	}
 
 	if err := tmuxproc.CheckTmux(cfg.tmuxBin); err != nil {
@@ -80,8 +87,9 @@ func run(cfg config) error {
 	go hub.RequestStateSyncWithRetry()
 
 	handler, err := httpd.NewServer(httpd.Config{
-		StaticDir: cfg.staticDir,
-		Hub:       hub,
+		StaticDir:   cfg.staticDir,
+		Hub:         hub,
+		DefaultTerm: cfg.term,
 	})
 	if err != nil {
 		return err
@@ -101,6 +109,14 @@ func run(cfg config) error {
 		return err
 	}
 	return nil
+}
+
+func normalizeDefaultTerm(raw string) string {
+	v := strings.ToLower(strings.TrimSpace(raw))
+	if v == "ghostty" || v == "xterm" {
+		return v
+	}
+	return ""
 }
 
 func envOr(name, fallback string) string {
