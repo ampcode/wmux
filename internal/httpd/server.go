@@ -33,6 +33,7 @@ func NewServer(cfg Config) (http.Handler, error) {
 	mux.HandleFunc("/api/state.json", func(w http.ResponseWriter, r *http.Request) { serveAPIState(w, r, cfg.Hub, defaultTerm) })
 	mux.HandleFunc("/api/state.html", func(w http.ResponseWriter, r *http.Request) { serveAPIState(w, r, cfg.Hub, defaultTerm) })
 	mux.HandleFunc("/api/contents/", func(w http.ResponseWriter, r *http.Request) { serveAPIContents(w, r, cfg.Hub) })
+	mux.HandleFunc("/api/panes/", func(w http.ResponseWriter, r *http.Request) { serveAPIPane(w, r, cfg.Hub, defaultTerm) })
 	mux.HandleFunc("/api/panes", func(w http.ResponseWriter, r *http.Request) { serveAPIPanes(w, r, cfg.Hub, defaultTerm) })
 	mux.HandleFunc("/api/debug/unicode", func(w http.ResponseWriter, r *http.Request) { serveAPIDebugUnicode(w, r, cfg.Hub) })
 	mux.HandleFunc("/p", func(w http.ResponseWriter, r *http.Request) {
@@ -56,7 +57,7 @@ func NewServer(cfg Config) (http.Handler, error) {
 	}
 	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
-			redirectToFirstPane(w, r, cfg.Hub, defaultTerm)
+			serveAPIRoot(w, r, cfg.Hub, defaultTerm)
 			return
 		}
 		staticHandler.ServeHTTP(w, r)
@@ -96,46 +97,158 @@ func serveIndex(w http.ResponseWriter, _ *http.Request, staticDir string) {
 	_, _ = w.Write(b)
 }
 
-func serveAPIState(w http.ResponseWriter, r *http.Request, hub *wshub.Hub, defaultTerm string) {
-	panes := hub.CurrentTargetSessionPaneInfos()
-	format := negotiateStateFormat(r)
+func serveAPIRoot(w http.ResponseWriter, r *http.Request, hub *wshub.Hub, defaultTerm string) {
+	doc := buildHypermediaDocument("/", hub.CurrentTargetSessionPaneInfos(), defaultTerm)
+	serveHypermediaDocument(w, r, doc)
+}
 
+func serveAPIState(w http.ResponseWriter, r *http.Request, hub *wshub.Hub, defaultTerm string) {
+	doc := buildHypermediaDocument(r.URL.Path, hub.CurrentTargetSessionPaneInfos(), defaultTerm)
+	serveHypermediaDocument(w, r, doc)
+}
+
+type hypermediaLink struct {
+	Rel       string `json:"rel"`
+	Href      string `json:"href"`
+	Method    string `json:"method,omitempty"`
+	Type      string `json:"type,omitempty"`
+	Templated bool   `json:"templated,omitempty"`
+	Example   string `json:"example,omitempty"`
+}
+
+type hypermediaActionField struct {
+	Name        string `json:"name"`
+	Type        string `json:"type"`
+	Required    bool   `json:"required,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
+type hypermediaAction struct {
+	Name        string                  `json:"name"`
+	Title       string                  `json:"title,omitempty"`
+	Method      string                  `json:"method"`
+	Href        string                  `json:"href"`
+	Type        string                  `json:"type,omitempty"`
+	Description string                  `json:"description,omitempty"`
+	Fields      []hypermediaActionField `json:"fields,omitempty"`
+	Schema      any                     `json:"schema,omitempty"`
+}
+
+type paneDocument struct {
+	PaneID      string           `json:"pane_id"`
+	PaneIndex   int              `json:"pane_index"`
+	Name        string           `json:"name"`
+	SessionName string           `json:"session_name"`
+	Width       int              `json:"width"`
+	Height      int              `json:"height"`
+	Links       []hypermediaLink `json:"links,omitempty"`
+}
+
+type hypermediaDocument struct {
+	Resource    string             `json:"resource"`
+	DefaultTerm string             `json:"default_term"`
+	Links       []hypermediaLink   `json:"links"`
+	Actions     []hypermediaAction `json:"actions,omitempty"`
+	Panes       []paneDocument     `json:"panes"`
+}
+
+func serveHypermediaDocument(w http.ResponseWriter, r *http.Request, doc hypermediaDocument) {
+	format := negotiateStateFormat(r)
 	if format == "html" {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		rows := make([]struct {
-			Title string
-			Size  string
-			Href  string
-		}, 0, len(panes))
-		for _, pane := range panes {
-			title := pane.Name
-			if strings.TrimSpace(title) == "" {
-				title = fmt.Sprintf("pane %s", pane.PaneID)
-			}
-			rows = append(rows, struct {
-				Title string
-				Size  string
-				Href  string
-			}{
-				Title: title,
-				Size:  fmt.Sprintf("%dx%d", pane.Width, pane.Height),
-				Href:  paneTargetHref(pane.PaneID, defaultTerm),
-			})
-		}
 		_ = stateHTMLTemplate.Execute(w, struct {
-			Panes []struct {
-				Title string
-				Size  string
-				Href  string
-			}
-		}{Panes: rows})
+			Doc                   hypermediaDocument
+			CreatePaneRequestBody string
+		}{
+			Doc:                   doc,
+			CreatePaneRequestBody: "{\n  \"env\": {\"NAME\": \"value\"},\n  \"cwd\": \"/absolute/path\",\n  \"cmd\": [\"bash\", \"-lc\", \"echo hello\"]\n}",
+		})
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(struct {
-		Panes any `json:"panes"`
-	}{Panes: panes})
+	_ = json.NewEncoder(w).Encode(doc)
+}
+
+func buildHypermediaDocument(selfPath string, panes []wshub.PaneInfo, defaultTerm string) hypermediaDocument {
+	examplePaneID := "0"
+	if len(panes) > 0 {
+		examplePaneID = panes[0].PaneID
+	}
+
+	doc := hypermediaDocument{
+		Resource:    "wmux",
+		DefaultTerm: normalizeDefaultTerm(defaultTerm),
+		Links: []hypermediaLink{
+			{Rel: "self", Href: selfPath, Method: "GET", Type: "application/json"},
+			{Rel: "root", Href: "/", Method: "GET"},
+			{Rel: "state", Href: "/api/state.json", Method: "GET", Type: "application/json"},
+			{Rel: "state-html", Href: "/api/state.html", Method: "GET", Type: "text/html"},
+			{Rel: "pane", Href: "/p/{pane_id}{?term}", Method: "GET", Type: "text/html", Templated: true, Example: paneTargetHref(examplePaneID, defaultTerm)},
+			{Rel: "pane-resource", Href: "/api/panes/{pane_id}", Method: "GET", Type: "application/json", Templated: true, Example: paneAPIHref(examplePaneID)},
+			{Rel: "pane-contents", Href: "/api/contents/{pane_id}{?escapes}", Method: "GET", Type: "text/plain; charset=utf-8", Templated: true, Example: "/api/contents/" + examplePaneID},
+			{Rel: "create-pane", Href: "/api/panes", Method: "POST", Type: "application/json"},
+			{Rel: "ws", Href: "/ws", Method: "GET"},
+		},
+		Actions: []hypermediaAction{createPaneAction()},
+		Panes:   make([]paneDocument, 0, len(panes)),
+	}
+	for _, pane := range panes {
+		doc.Panes = append(doc.Panes, paneResource(pane, defaultTerm))
+	}
+	return doc
+}
+
+func createPaneAction() hypermediaAction {
+	return hypermediaAction{
+		Name:        "create-pane",
+		Title:       "Create Pane",
+		Method:      "POST",
+		Href:        "/api/panes",
+		Type:        "application/json",
+		Description: "Create a new pane in the target tmux session.",
+		Fields: []hypermediaActionField{
+			{Name: "env", Type: "object", Description: "Optional environment variables map; keys must match [A-Za-z_][A-Za-z0-9_]*."},
+			{Name: "cwd", Type: "string", Description: "Optional working directory path."},
+			{Name: "cmd", Type: "array[string]", Description: "Optional command argv executed in the new pane."},
+		},
+		Schema: map[string]any{
+			"$schema":              "https://json-schema.org/draft/2020-12/schema",
+			"type":                 "object",
+			"additionalProperties": false,
+			"properties": map[string]any{
+				"env": map[string]any{
+					"type":                 "object",
+					"additionalProperties": map[string]any{"type": "string"},
+				},
+				"cwd": map[string]any{
+					"type":      "string",
+					"minLength": 1,
+				},
+				"cmd": map[string]any{
+					"type":  "array",
+					"items": map[string]any{"type": "string"},
+				},
+			},
+		},
+	}
+}
+
+func paneResource(pane wshub.PaneInfo, defaultTerm string) paneDocument {
+	return paneDocument{
+		PaneID:      pane.PaneID,
+		PaneIndex:   pane.PaneIndex,
+		Name:        pane.Name,
+		SessionName: pane.SessionName,
+		Width:       pane.Width,
+		Height:      pane.Height,
+		Links: []hypermediaLink{
+			{Rel: "self", Href: paneAPIHref(pane.PaneID), Method: "GET", Type: "application/json"},
+			{Rel: "terminal", Href: paneTargetHref(pane.PaneID, defaultTerm), Method: "GET", Type: "text/html"},
+			{Rel: "contents", Href: "/api/contents/" + pane.PaneID, Method: "GET", Type: "text/plain; charset=utf-8"},
+			{Rel: "contents-escaped", Href: "/api/contents/" + pane.PaneID + "?escapes=1", Method: "GET", Type: "text/plain; charset=utf-8"},
+		},
+	}
 }
 
 func serveAPIContents(w http.ResponseWriter, r *http.Request, hub *wshub.Hub) {
@@ -173,6 +286,37 @@ type createPaneRequest struct {
 	Cmd []string          `json:"cmd"`
 }
 
+func serveAPIPane(w http.ResponseWriter, r *http.Request, hub *wshub.Hub, defaultTerm string) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	paneID, ok := parsePanePathID(r.URL.EscapedPath(), "/api/panes/")
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	pane, found := targetSessionPaneByPublicID(hub, paneID)
+	if !found {
+		http.Error(w, "pane not found", http.StatusNotFound)
+		return
+	}
+
+	doc := hypermediaDocument{
+		Resource:    "wmux-pane",
+		DefaultTerm: normalizeDefaultTerm(defaultTerm),
+		Links: []hypermediaLink{
+			{Rel: "self", Href: paneAPIHref(pane.PaneID), Method: "GET", Type: "application/json"},
+			{Rel: "collection", Href: "/api/state.json", Method: "GET", Type: "application/json"},
+			{Rel: "root", Href: "/", Method: "GET"},
+		},
+		Actions: []hypermediaAction{createPaneAction()},
+		Panes:   []paneDocument{paneResource(pane, defaultTerm)},
+	}
+	serveHypermediaDocument(w, r, doc)
+}
+
 func serveAPIPanes(w http.ResponseWriter, r *http.Request, hub *wshub.Hub, defaultTerm string) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -206,14 +350,26 @@ func serveAPIPanes(w http.ResponseWriter, r *http.Request, hub *wshub.Hub, defau
 		return
 	}
 
+	if resolved, found := targetSessionPaneByPublicID(hub, pane.PaneID); found {
+		pane = resolved
+	}
+	location := paneAPIHref(pane.PaneID)
+	doc := hypermediaDocument{
+		Resource:    "wmux-pane",
+		DefaultTerm: normalizeDefaultTerm(defaultTerm),
+		Links: []hypermediaLink{
+			{Rel: "self", Href: location, Method: "GET", Type: "application/json"},
+			{Rel: "collection", Href: "/api/state.json", Method: "GET", Type: "application/json"},
+			{Rel: "root", Href: "/", Method: "GET"},
+		},
+		Actions: []hypermediaAction{createPaneAction()},
+		Panes:   []paneDocument{paneResource(pane, defaultTerm)},
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Location", paneTargetHref(pane.PaneID, defaultTerm))
+	w.Header().Set("Location", location)
 	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(struct {
-		PaneID string `json:"pane_id"`
-	}{
-		PaneID: pane.PaneID,
-	})
+	_ = json.NewEncoder(w).Encode(doc)
 }
 
 func validateCreatePaneRequest(req createPaneRequest) error {
@@ -247,34 +403,6 @@ func isValidEnvKey(v string) bool {
 		}
 	}
 	return true
-}
-
-func redirectToFirstPane(w http.ResponseWriter, r *http.Request, hub *wshub.Hub, defaultTerm string) {
-	if href, ok := firstTargetPaneHref(hub, defaultTerm); ok {
-		http.Redirect(w, r, href, http.StatusFound)
-		return
-	}
-	http.Redirect(w, r, statePageHref(defaultTerm), http.StatusFound)
-}
-
-func firstTargetPaneHref(hub *wshub.Hub, defaultTerm string) (string, bool) {
-	panes := hub.CurrentTargetSessionPaneInfos()
-	if len(panes) == 0 {
-		return "", false
-	}
-	firstPane := panes[0]
-	for _, pane := range panes[1:] {
-		if pane.PaneIndex < firstPane.PaneIndex {
-			firstPane = pane
-		}
-	}
-	return paneTargetHref(firstPane.PaneID, defaultTerm), true
-}
-
-func statePageHref(defaultTerm string) string {
-	v := url.Values{}
-	v.Set("term", normalizeDefaultTerm(defaultTerm))
-	return "/api/state.html?" + v.Encode()
 }
 
 func ensureTermQuery(r *http.Request, defaultTerm string) (string, bool) {
@@ -457,6 +585,19 @@ func hexPreview(s string, maxBytes int) string {
 	return strings.Join(parts, " ")
 }
 
+func targetSessionPaneByPublicID(hub *wshub.Hub, paneID string) (wshub.PaneInfo, bool) {
+	for _, pane := range hub.CurrentTargetSessionPaneInfos() {
+		if pane.PaneID == paneID {
+			return pane, true
+		}
+	}
+	return wshub.PaneInfo{}, false
+}
+
+func paneAPIHref(paneID string) string {
+	return "/api/panes/" + url.PathEscape(paneID)
+}
+
 func paneTargetHref(paneID, defaultTerm string) string {
 	v := url.Values{}
 	v.Set("term", normalizeDefaultTerm(defaultTerm))
@@ -494,22 +635,170 @@ var stateHTMLTemplate = template.Must(template.New("state").Parse(`<!doctype htm
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>wmux panes</title>
+  <title>wmux API</title>
   <style>
     body { font-family: ui-sans-serif, -apple-system, sans-serif; margin: 2rem; }
+    h1, h2, h3 { margin-bottom: 0.5rem; }
+    section { margin-bottom: 1.5rem; }
     ul { padding-left: 1.2rem; }
     li { margin: 0.45rem 0; }
-    small { color: #555; margin-left: 0.45rem; }
+    form { border: 1px solid #d0d7de; border-radius: 0.5rem; padding: 1rem; max-width: 48rem; }
+    .field { margin: 0.75rem 0; }
+    label { display: block; font-weight: 600; margin-bottom: 0.25rem; }
+    input, textarea { width: 100%; box-sizing: border-box; padding: 0.5rem; font: inherit; }
+    button { margin-top: 0.5rem; padding: 0.55rem 0.9rem; font: inherit; cursor: pointer; }
+    .meta { color: #555; margin-left: 0.45rem; }
+    pre { background: #f6f8fa; padding: 0.8rem; border-radius: 0.4rem; overflow-x: auto; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   </style>
 </head>
 <body>
-  <h1>Available Panes</h1>
-  <ul>
-  {{range .Panes}}
-    <li><a href="{{.Href}}">{{.Title}}</a><small>{{.Size}}</small></li>
-  {{else}}
-    <li>No panes available.</li>
-  {{end}}
-  </ul>
+  <h1>wmux API</h1>
+  <p>Default terminal renderer: <code>{{.Doc.DefaultTerm}}</code></p>
+
+  <section>
+    <h2>Links</h2>
+    <ul>
+    {{range .Doc.Links}}
+      <li>
+        <code>{{.Method}}</code>
+        {{if .Templated}}
+          <code>{{.Href}}</code>
+        {{else}}
+          <a href="{{.Href}}">{{.Href}}</a>
+        {{end}}
+        <span class="meta">rel={{.Rel}}{{if .Type}}, type={{.Type}}{{end}}{{if .Templated}}, templated=true{{end}}</span>
+        {{if .Example}}<span class="meta">example: <a href="{{.Example}}">{{.Example}}</a></span>{{end}}
+      </li>
+    {{end}}
+    </ul>
+  </section>
+
+  <section>
+    <h2>Actions</h2>
+    {{range .Doc.Actions}}
+      <h3>{{.Title}}</h3>
+      <p><code>{{.Method}}</code> <code>{{.Href}}</code>{{if .Type}} ({{.Type}}){{end}}</p>
+      <p>{{.Description}}</p>
+      <ul>
+      {{range .Fields}}
+        <li><code>{{.Name}}</code>: <code>{{.Type}}</code> <span class="meta">{{.Description}}</span></li>
+      {{end}}
+      </ul>
+      {{if eq .Name "create-pane"}}
+      <form id="create-pane-form" action="{{.Href}}" method="post">
+        <div class="field">
+          <label for="create-pane-cwd">cwd (optional)</label>
+          <input id="create-pane-cwd" name="cwd" type="text" placeholder="/absolute/path" />
+        </div>
+        <div class="field">
+          <label for="create-pane-env">env (optional JSON object)</label>
+          <textarea id="create-pane-env" name="env" rows="4" placeholder='{"FOO":"bar"}'></textarea>
+        </div>
+        <div class="field">
+          <label for="create-pane-cmd">cmd (optional JSON array)</label>
+          <textarea id="create-pane-cmd" name="cmd" rows="4" placeholder='["bash","-lc","echo hello"]'></textarea>
+        </div>
+        <button type="submit">Create Pane</button>
+      </form>
+      <pre id="create-pane-result" aria-live="polite"><code>Submit the form to create a pane.</code></pre>
+      {{end}}
+    {{end}}
+    <p>Example request body:</p>
+    <pre><code>{{.CreatePaneRequestBody}}</code></pre>
+  </section>
+
+  <section>
+    <h2>Available Panes</h2>
+    <ul>
+    {{range .Doc.Panes}}
+      <li>
+        <strong>{{if .Name}}{{.Name}}{{else}}pane {{.PaneID}}{{end}}</strong>
+        <span class="meta">{{.Width}}x{{.Height}} (pane_id={{.PaneID}})</span>
+        <ul>
+        {{range .Links}}
+          <li><code>{{.Method}}</code> <a href="{{.Href}}">{{.Href}}</a> <span class="meta">rel={{.Rel}}</span></li>
+        {{end}}
+        </ul>
+      </li>
+    {{else}}
+      <li>No panes available.</li>
+    {{end}}
+    </ul>
+  </section>
+  <script>
+    (function () {
+      const form = document.getElementById("create-pane-form");
+      const result = document.getElementById("create-pane-result");
+      if (!form || !result) return;
+
+      const setResult = (value) => {
+        result.textContent = value;
+      };
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const payload = {};
+
+        const cwd = String((document.getElementById("create-pane-cwd") || {}).value || "").trim();
+        const envText = String((document.getElementById("create-pane-env") || {}).value || "").trim();
+        const cmdText = String((document.getElementById("create-pane-cmd") || {}).value || "").trim();
+
+        if (cwd) payload.cwd = cwd;
+
+        try {
+          if (envText) {
+            const env = JSON.parse(envText);
+            if (!env || typeof env !== "object" || Array.isArray(env)) {
+              throw new Error("env must be a JSON object");
+            }
+            payload.env = env;
+          }
+          if (cmdText) {
+            const cmd = JSON.parse(cmdText);
+            if (!Array.isArray(cmd) || cmd.some((v) => typeof v !== "string")) {
+              throw new Error("cmd must be a JSON array of strings");
+            }
+            payload.cmd = cmd;
+          }
+        } catch (err) {
+          setResult("Invalid form data: " + (err && err.message ? err.message : String(err)));
+          return;
+        }
+
+        setResult("Creating pane...");
+        try {
+          const res = await fetch(form.action, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          const text = await res.text();
+          if (!res.ok) {
+            setResult("Request failed (" + res.status + "): " + text);
+            return;
+          }
+          let paneHref = "";
+          try {
+            const body = JSON.parse(text);
+            const pane = Array.isArray(body.panes) && body.panes.length > 0 ? body.panes[0] : null;
+            if (pane && Array.isArray(pane.links)) {
+              const terminal = pane.links.find((l) => l && l.rel === "terminal" && typeof l.href === "string");
+              if (terminal) paneHref = terminal.href;
+            }
+          } catch {
+            // Keep raw response fallback below.
+          }
+          if (paneHref) {
+            setResult("Created pane. Open: " + paneHref + "\n\n" + text);
+            return;
+          }
+          setResult(text);
+        } catch (err) {
+          setResult("Request error: " + (err && err.message ? err.message : String(err)));
+        }
+      });
+    })();
+  </script>
 </body>
 </html>`))

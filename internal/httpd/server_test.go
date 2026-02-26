@@ -20,7 +20,7 @@ func TestPaneTargetHrefUsesPaneIDPath(t *testing.T) {
 	}
 }
 
-func TestRootRedirectsToFirstPane(t *testing.T) {
+func TestRootReturnsJSONHypermediaWithFollowUpLinks(t *testing.T) {
 	hub := wshub.New(policy.Default(), "webui")
 	tmux := &scriptedTmuxSender{hub: hub}
 	if err := hub.BindTmux(tmux); err != nil {
@@ -37,19 +37,80 @@ func TestRootRedirectsToFirstPane(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Accept", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusFound {
+	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	if got := rec.Header().Get("Location"); got != "/p/13?term=ghostty" {
-		t.Fatalf("location = %q, want %q", got, "/p/13?term=ghostty")
+	if got := rec.Header().Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
+		t.Fatalf("content-type = %q, want application/json", got)
+	}
+
+	var payload struct {
+		Resource string `json:"resource"`
+		Links    []struct {
+			Rel       string `json:"rel"`
+			Href      string `json:"href"`
+			Method    string `json:"method"`
+			Templated bool   `json:"templated"`
+		} `json:"links"`
+		Actions []struct {
+			Name   string `json:"name"`
+			Method string `json:"method"`
+			Href   string `json:"href"`
+		} `json:"actions"`
+		Panes []struct {
+			PaneID string `json:"pane_id"`
+			Links  []struct {
+				Rel  string `json:"rel"`
+				Href string `json:"href"`
+			} `json:"links"`
+		} `json:"panes"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Resource != "wmux" {
+		t.Fatalf("resource = %q, want %q", payload.Resource, "wmux")
+	}
+	if !hasDocLink(payload.Links, "create-pane", "/api/panes", "POST") {
+		t.Fatalf("missing create-pane link: %#v", payload.Links)
+	}
+	if !hasDocLink(payload.Links, "pane-contents", "/api/contents/{pane_id}{?escapes}", "GET") {
+		t.Fatalf("missing pane contents template link: %#v", payload.Links)
+	}
+	if !hasDocLink(payload.Links, "pane-resource", "/api/panes/{pane_id}", "GET") {
+		t.Fatalf("missing pane-resource template link: %#v", payload.Links)
+	}
+	if !hasDocAction(payload.Actions, "create-pane", "/api/panes", "POST") {
+		t.Fatalf("missing create-pane action: %#v", payload.Actions)
+	}
+	if len(payload.Panes) == 0 || payload.Panes[0].PaneID != "13" {
+		t.Fatalf("unexpected panes payload: %#v", payload.Panes)
+	}
+	if !hasPaneLink(payload.Panes[0].Links, "contents", "/api/contents/13") {
+		t.Fatalf("missing per-pane contents link: %#v", payload.Panes[0].Links)
+	}
+	if !hasPaneLink(payload.Panes[0].Links, "self", "/api/panes/13") {
+		t.Fatalf("missing per-pane self link: %#v", payload.Panes[0].Links)
+	}
+	if !hasPaneLink(payload.Panes[0].Links, "terminal", "/p/13?term=ghostty") {
+		t.Fatalf("missing per-pane terminal link: %#v", payload.Panes[0].Links)
 	}
 }
 
-func TestRootRedirectsToStatePageWhenNoPanesAvailable(t *testing.T) {
+func TestRootReturnsHTMLHypermediaWhenRequested(t *testing.T) {
 	hub := wshub.New(policy.Default(), "webui")
+	tmux := &scriptedTmuxSender{hub: hub}
+	if err := hub.BindTmux(tmux); err != nil {
+		t.Fatalf("BindTmux: %v", err)
+	}
+	if err := hub.RequestStateSync(); err != nil {
+		t.Fatalf("RequestStateSync: %v", err)
+	}
+	waitForTargetPaneID(t, hub, "13")
 
 	h, err := NewServer(Config{Hub: hub})
 	if err != nil {
@@ -57,18 +118,38 @@ func TestRootRedirectsToStatePageWhenNoPanesAvailable(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Accept", "text/html")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusFound {
+	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	if got := rec.Header().Get("Location"); got != "/api/state.html?term=ghostty" {
-		t.Fatalf("location = %q, want %q", got, "/api/state.html?term=ghostty")
+	if got := rec.Header().Get("Content-Type"); !strings.HasPrefix(got, "text/html") {
+		t.Fatalf("content-type = %q, want text/html", got)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "POST") || !strings.Contains(body, "/api/panes") {
+		t.Fatalf("html missing create-pane affordance: %s", body)
+	}
+	if !strings.Contains(body, `id="create-pane-form"`) {
+		t.Fatalf("html missing create-pane form: %s", body)
+	}
+	if !strings.Contains(body, `id="create-pane-result"`) {
+		t.Fatalf("html missing create-pane form result region: %s", body)
+	}
+	if !strings.Contains(body, "/api/contents/{pane_id}{?escapes}") {
+		t.Fatalf("html missing pane contents template: %s", body)
+	}
+	if !strings.Contains(body, "example:") {
+		t.Fatalf("html missing concrete link examples: %s", body)
+	}
+	if !strings.Contains(body, "/p/13?term=ghostty") {
+		t.Fatalf("html missing pane terminal link: %s", body)
 	}
 }
 
-func TestRootRedirectUsesConfiguredDefaultTerm(t *testing.T) {
+func TestRootUsesConfiguredDefaultTermInHypermediaLinks(t *testing.T) {
 	hub := wshub.New(policy.Default(), "webui")
 	tmux := &scriptedTmuxSender{hub: hub}
 	if err := hub.BindTmux(tmux); err != nil {
@@ -85,14 +166,31 @@ func TestRootRedirectUsesConfiguredDefaultTerm(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Accept", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusFound {
+	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	if got := rec.Header().Get("Location"); got != "/p/13?term=xterm" {
-		t.Fatalf("location = %q, want %q", got, "/p/13?term=xterm")
+
+	var payload struct {
+		DefaultTerm string `json:"default_term"`
+		Panes       []struct {
+			Links []struct {
+				Rel  string `json:"rel"`
+				Href string `json:"href"`
+			} `json:"links"`
+		} `json:"panes"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.DefaultTerm != "xterm" {
+		t.Fatalf("default_term = %q, want %q", payload.DefaultTerm, "xterm")
+	}
+	if len(payload.Panes) == 0 || !hasPaneLink(payload.Panes[0].Links, "terminal", "/p/13?term=xterm") {
+		t.Fatalf("pane terminal link did not use xterm: %#v", payload.Panes)
 	}
 }
 
@@ -262,6 +360,70 @@ func TestAPIStateReturnsStablePaneIDWithoutAbsolutePaneID(t *testing.T) {
 	}
 }
 
+func TestAPIPaneReturnsSinglePaneResource(t *testing.T) {
+	hub := wshub.New(policy.Default(), "webui")
+	tmux := &scriptedTmuxSender{hub: hub}
+	if err := hub.BindTmux(tmux); err != nil {
+		t.Fatalf("BindTmux: %v", err)
+	}
+	if err := hub.RequestStateSync(); err != nil {
+		t.Fatalf("RequestStateSync: %v", err)
+	}
+	waitForTargetPaneID(t, hub, "13")
+
+	h, err := NewServer(Config{Hub: hub})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/panes/13", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Resource string `json:"resource"`
+		Panes    []struct {
+			PaneID string `json:"pane_id"`
+			Links  []struct {
+				Rel  string `json:"rel"`
+				Href string `json:"href"`
+			} `json:"links"`
+		} `json:"panes"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Resource != "wmux-pane" {
+		t.Fatalf("resource = %q, want %q", payload.Resource, "wmux-pane")
+	}
+	if len(payload.Panes) != 1 || payload.Panes[0].PaneID != "13" {
+		t.Fatalf("unexpected panes payload: %#v", payload.Panes)
+	}
+	if !hasPaneLink(payload.Panes[0].Links, "self", "/api/panes/13") {
+		t.Fatalf("pane self link missing: %#v", payload.Panes[0].Links)
+	}
+}
+
+func TestAPIPaneReturnsNotFoundForUnknownPane(t *testing.T) {
+	hub := wshub.New(policy.Default(), "webui")
+	h, err := NewServer(Config{Hub: hub})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/panes/404", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestAPIPanesCreatesPaneWithOptions(t *testing.T) {
 	hub := wshub.New(policy.Default(), "webui")
 	tmux := &scriptedTmuxSender{hub: hub}
@@ -287,18 +449,41 @@ func TestAPIPanesCreatesPaneWithOptions(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	if got := rec.Header().Get("Location"); got != "/p/14?term=ghostty" {
-		t.Fatalf("location = %q, want %q", got, "/p/14?term=ghostty")
+	if got := rec.Header().Get("Location"); got != "/api/panes/14" {
+		t.Fatalf("location = %q, want %q", got, "/api/panes/14")
 	}
 
 	var payload struct {
-		PaneID string `json:"pane_id"`
+		Resource string `json:"resource"`
+		Actions  []struct {
+			Name   string         `json:"name"`
+			Schema map[string]any `json:"schema"`
+		} `json:"actions"`
+		Panes []struct {
+			PaneID string `json:"pane_id"`
+			Links  []struct {
+				Rel  string `json:"rel"`
+				Href string `json:"href"`
+			} `json:"links"`
+		} `json:"panes"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if payload.PaneID != "14" {
-		t.Fatalf("pane_id = %q, want %q", payload.PaneID, "14")
+	if payload.Resource != "wmux-pane" {
+		t.Fatalf("resource = %q, want %q", payload.Resource, "wmux-pane")
+	}
+	if len(payload.Panes) != 1 || payload.Panes[0].PaneID != "14" {
+		t.Fatalf("unexpected panes payload: %#v", payload.Panes)
+	}
+	if !hasPaneLink(payload.Panes[0].Links, "self", "/api/panes/14") {
+		t.Fatalf("missing self link in create response: %#v", payload.Panes[0].Links)
+	}
+	if len(payload.Actions) == 0 || payload.Actions[0].Name != "create-pane" {
+		t.Fatalf("missing create-pane action: %#v", payload.Actions)
+	}
+	if _, ok := payload.Actions[0].Schema["properties"]; !ok {
+		t.Fatalf("missing machine-readable schema in action: %#v", payload.Actions[0].Schema)
 	}
 
 	line := tmux.LastCommandWithPrefix("split-window ")
@@ -419,6 +604,45 @@ func TestAPIDebugUnicodeCapturesLatestReport(t *testing.T) {
 	if report.Server.EscapedSample != "\u001b[31mred\u001b[0m" {
 		t.Fatalf("escaped sample = %q, want escape-decorated output", report.Server.EscapedSample)
 	}
+}
+
+func hasDocLink(links []struct {
+	Rel       string "json:\"rel\""
+	Href      string "json:\"href\""
+	Method    string "json:\"method\""
+	Templated bool   "json:\"templated\""
+}, rel, href, method string) bool {
+	for _, link := range links {
+		if link.Rel == rel && link.Href == href && link.Method == method {
+			return true
+		}
+	}
+	return false
+}
+
+func hasDocAction(actions []struct {
+	Name   string "json:\"name\""
+	Method string "json:\"method\""
+	Href   string "json:\"href\""
+}, name, href, method string) bool {
+	for _, action := range actions {
+		if action.Name == name && action.Href == href && action.Method == method {
+			return true
+		}
+	}
+	return false
+}
+
+func hasPaneLink(links []struct {
+	Rel  string "json:\"rel\""
+	Href string "json:\"href\""
+}, rel, href string) bool {
+	for _, link := range links {
+		if link.Rel == rel && link.Href == href {
+			return true
+		}
+	}
+	return false
 }
 
 func waitForTargetPaneID(t *testing.T, hub *wshub.Hub, paneID string) {

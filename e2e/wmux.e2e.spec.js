@@ -164,6 +164,20 @@ test('headless flow covers state, pane attach, input mapping, and resize', async
   expect(Array.isArray(state.panes)).toBeTruthy();
   expect(state.panes.some((p) => p.pane_id === publicPaneId)).toBeTruthy();
 
+  const rootRes = await request.get(`${baseURL}/`);
+  expect(rootRes.ok()).toBeTruthy();
+  const root = await rootRes.json();
+  expect(Array.isArray(root.links)).toBeTruthy();
+  expect(root.links.some((l) => l.rel === 'create-pane' && l.href === '/api/panes' && l.method === 'POST')).toBeTruthy();
+  expect(Array.isArray(root.actions)).toBeTruthy();
+  expect(root.actions.some((a) => a.name === 'create-pane' && a.href === '/api/panes' && a.method === 'POST')).toBeTruthy();
+  expect(Array.isArray(root.panes)).toBeTruthy();
+  expect(root.panes.some((p) => p.pane_id === publicPaneId)).toBeTruthy();
+
+  const rootHTML = await request.get(`${baseURL}/`, { headers: { Accept: 'text/html' } });
+  expect(rootHTML.ok()).toBeTruthy();
+  await expect(rootHTML.text()).resolves.toContain('id="create-pane-form"');
+
   const stateHTML = await request.get(`${baseURL}/api/state.html`);
   expect(stateHTML.ok()).toBeTruthy();
   await expect(stateHTML.text()).resolves.toContain(`/p/${publicPaneId}`);
@@ -255,24 +269,28 @@ test('api can create pane with env cwd and cmd', async ({ request }) => {
   expect(createRes.status()).toBe(201);
 
   const created = await createRes.json();
-  expect(typeof created?.pane_id).toBe('string');
-  expect(created.pane_id.length).toBeGreaterThan(0);
+  expect(created.resource).toBe('wmux-pane');
+  expect(Array.isArray(created.panes)).toBeTruthy();
+  expect(created.panes.length).toBe(1);
+  const createdPaneId = created.panes[0].pane_id;
+  expect(typeof createdPaneId).toBe('string');
+  expect(createdPaneId.length).toBeGreaterThan(0);
 
   const location = createRes.headers()['location'];
-  expect(location).toContain(`/p/${created.pane_id}`);
+  expect(location).toBe(`/api/panes/${createdPaneId}`);
 
   await expect
     .poll(async () => {
       const res = await request.get(`${baseURL}/api/state.json`);
       if (!res.ok()) return false;
       const body = await res.json();
-      return Array.isArray(body.panes) && body.panes.some((p) => p.pane_id === created.pane_id);
+      return Array.isArray(body.panes) && body.panes.some((p) => p.pane_id === createdPaneId);
     })
     .toBeTruthy();
 
   await expect
     .poll(async () => {
-      const res = await request.get(`${baseURL}/api/contents/${created.pane_id}`);
+      const res = await request.get(`${baseURL}/api/contents/${createdPaneId}`);
       if (!res.ok()) return '';
       return await res.text();
     })
