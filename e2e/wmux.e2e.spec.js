@@ -1,6 +1,7 @@
 const { test, expect } = require('@playwright/test');
 const { execFileSync, spawn } = require('node:child_process');
 const net = require('node:net');
+const path = require('node:path');
 
 function sh(command, args, opts = {}) {
   return execFileSync(command, args, {
@@ -171,7 +172,7 @@ test('headless flow covers state, pane attach, input mapping, and resize', async
   page.on('console', (msg) => browserLogs.push(`[console:${msg.type()}] ${msg.text()}`));
   page.on('pageerror', (err) => browserLogs.push(`[pageerror] ${err.message}`));
 
-  await page.goto(`${baseURL}/p/${publicPaneId}`);
+  await page.goto(`${baseURL}/p/${publicPaneId}?term=xterm`);
   const termReady = await waitFor(async () => {
     const count = await page.locator('#terminal-host .term').count();
     return count > 0;
@@ -180,6 +181,10 @@ test('headless flow covers state, pane attach, input mapping, and resize', async
   if (!termReady) {
     throw new Error(`terminal never mounted; browser logs:\n${browserLogs.join('\n')}`);
   }
+
+  await expect
+    .poll(async () => page.locator('.xterm-rows').count())
+    .toBeGreaterThan(0);
 
   const baselineTerminalText = await page.locator('.xterm-rows').innerText();
   const baselineCapture = sh('tmux', ['capture-pane', '-pt', paneId, '-S', '-120']);
@@ -231,4 +236,45 @@ test('headless flow covers state, pane attach, input mapping, and resize', async
       return messages.some((argv) => argv[0] === 'refresh-client' && argv.includes('-C'));
     })
     .toBeTruthy();
+});
+
+test('api can create pane with env cwd and cmd', async ({ request }) => {
+  test.skip(shouldSkip, skipReason);
+
+  const workerPath = path.resolve(__dirname, '..', 'scripts', 'e2e-pane-worker.sh');
+  const marker = `WMUX_CREATE_${Date.now()}`;
+  const cwd = path.resolve(__dirname, '..');
+
+  const createRes = await request.post(`${baseURL}/api/panes`, {
+    data: {
+      env: { WMUX_E2E_ENV: marker },
+      cwd,
+      cmd: ['bash', '-lc', `printf '__WMUX_CREATE__:%s|%s\\n' "$PWD" "$WMUX_E2E_ENV"; exec bash "${workerPath}"`],
+    },
+  });
+  expect(createRes.status()).toBe(201);
+
+  const created = await createRes.json();
+  expect(typeof created?.pane_id).toBe('string');
+  expect(created.pane_id.length).toBeGreaterThan(0);
+
+  const location = createRes.headers()['location'];
+  expect(location).toContain(`/p/${created.pane_id}`);
+
+  await expect
+    .poll(async () => {
+      const res = await request.get(`${baseURL}/api/state.json`);
+      if (!res.ok()) return false;
+      const body = await res.json();
+      return Array.isArray(body.panes) && body.panes.some((p) => p.pane_id === created.pane_id);
+    })
+    .toBeTruthy();
+
+  await expect
+    .poll(async () => {
+      const res = await request.get(`${baseURL}/api/contents/${created.pane_id}`);
+      if (!res.ok()) return '';
+      return await res.text();
+    })
+    .toContain(`__WMUX_CREATE__:${cwd}|${marker}`);
 });

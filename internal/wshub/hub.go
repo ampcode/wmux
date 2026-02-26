@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -44,6 +45,12 @@ type PaneInfo struct {
 	Width       int    `json:"width"`
 	Height      int    `json:"height"`
 	TmuxPaneID  string `json:"-"`
+}
+
+type CreatePaneOptions struct {
+	Env map[string]string `json:"env,omitempty"`
+	Cwd string            `json:"cwd,omitempty"`
+	Cmd []string          `json:"cmd,omitempty"`
 }
 
 type client struct {
@@ -252,6 +259,50 @@ func (h *Hub) CapturePaneContent(paneID string, withEscapes bool) (string, error
 	}
 
 	return strings.Join(res.Output, "\n"), nil
+}
+
+func (h *Hub) CreatePane(opts CreatePaneOptions) (PaneInfo, error) {
+	argv := []string{"split-window", "-P", "-F", "#{pane_id}", "-t", h.targetSession}
+	if strings.TrimSpace(opts.Cwd) != "" {
+		argv = append(argv, "-c", opts.Cwd)
+	}
+	if len(opts.Env) > 0 {
+		keys := make([]string, 0, len(opts.Env))
+		for k := range opts.Env {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			argv = append(argv, "-e", k+"="+opts.Env[k])
+		}
+	}
+	if len(opts.Cmd) > 0 {
+		argv = append(argv, joinShellCommand(opts.Cmd))
+	}
+
+	res, err := h.runCommandAndWait(argv, 5*time.Second, false)
+	if err != nil {
+		return PaneInfo{}, err
+	}
+	if !res.Success {
+		return PaneInfo{}, fmt.Errorf("split-window failed")
+	}
+
+	tmuxPaneID := ""
+	for i := len(res.Output) - 1; i >= 0; i-- {
+		candidate := strings.TrimSpace(res.Output[i])
+		if candidate != "" {
+			tmuxPaneID = candidate
+			break
+		}
+	}
+	paneID := publicPaneID(tmuxPaneID)
+	if paneID == "" {
+		return PaneInfo{}, fmt.Errorf("split-window did not return pane id")
+	}
+
+	_ = h.RequestStateSync()
+	return PaneInfo{PaneID: paneID, TmuxPaneID: tmuxPaneID}, nil
 }
 
 func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request) {
@@ -607,6 +658,14 @@ func quoteArg(arg string) string {
 	}
 	// Use single-quoted strings and escape a single quote as '\''.
 	return "'" + strings.ReplaceAll(arg, "'", "'\\''") + "'"
+}
+
+func joinShellCommand(argv []string) string {
+	parts := make([]string, 0, len(argv))
+	for _, arg := range argv {
+		parts = append(parts, quoteArg(arg))
+	}
+	return strings.Join(parts, " ")
 }
 
 func (c *client) writeLoop() {

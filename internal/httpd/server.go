@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,22 +19,34 @@ import (
 )
 
 type Config struct {
-	StaticDir string
-	Hub       *wshub.Hub
+	StaticDir   string
+	Hub         *wshub.Hub
+	DefaultTerm string
 }
 
 func NewServer(cfg Config) (http.Handler, error) {
+	defaultTerm := normalizeDefaultTerm(cfg.DefaultTerm)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", cfg.Hub.HandleWS)
-	mux.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) { serveAPIState(w, r, cfg.Hub) })
-	mux.HandleFunc("/api/state.json", func(w http.ResponseWriter, r *http.Request) { serveAPIState(w, r, cfg.Hub) })
-	mux.HandleFunc("/api/state.html", func(w http.ResponseWriter, r *http.Request) { serveAPIState(w, r, cfg.Hub) })
+	mux.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) { serveAPIState(w, r, cfg.Hub, defaultTerm) })
+	mux.HandleFunc("/api/state.json", func(w http.ResponseWriter, r *http.Request) { serveAPIState(w, r, cfg.Hub, defaultTerm) })
+	mux.HandleFunc("/api/state.html", func(w http.ResponseWriter, r *http.Request) { serveAPIState(w, r, cfg.Hub, defaultTerm) })
 	mux.HandleFunc("/api/contents/", func(w http.ResponseWriter, r *http.Request) { serveAPIContents(w, r, cfg.Hub) })
+	mux.HandleFunc("/api/panes", func(w http.ResponseWriter, r *http.Request) { serveAPIPanes(w, r, cfg.Hub, defaultTerm) })
 	mux.HandleFunc("/api/debug/unicode", func(w http.ResponseWriter, r *http.Request) { serveAPIDebugUnicode(w, r, cfg.Hub) })
 	mux.HandleFunc("/p", func(w http.ResponseWriter, r *http.Request) {
+		if redirectURL, ok := ensureTermQuery(r, defaultTerm); ok {
+			http.Redirect(w, r, redirectURL, http.StatusFound)
+			return
+		}
 		serveIndex(w, r, cfg.StaticDir)
 	})
 	mux.HandleFunc("/p/", func(w http.ResponseWriter, r *http.Request) {
+		if redirectURL, ok := ensureTermQuery(r, defaultTerm); ok {
+			http.Redirect(w, r, redirectURL, http.StatusFound)
+			return
+		}
 		serveIndex(w, r, cfg.StaticDir)
 	})
 
@@ -43,7 +56,7 @@ func NewServer(cfg Config) (http.Handler, error) {
 	}
 	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
-			redirectToFirstPane(w, r, cfg.Hub)
+			redirectToFirstPane(w, r, cfg.Hub, defaultTerm)
 			return
 		}
 		staticHandler.ServeHTTP(w, r)
@@ -83,7 +96,7 @@ func serveIndex(w http.ResponseWriter, _ *http.Request, staticDir string) {
 	_, _ = w.Write(b)
 }
 
-func serveAPIState(w http.ResponseWriter, r *http.Request, hub *wshub.Hub) {
+func serveAPIState(w http.ResponseWriter, r *http.Request, hub *wshub.Hub, defaultTerm string) {
 	panes := hub.CurrentTargetSessionPaneInfos()
 	format := negotiateStateFormat(r)
 
@@ -106,7 +119,7 @@ func serveAPIState(w http.ResponseWriter, r *http.Request, hub *wshub.Hub) {
 			}{
 				Title: title,
 				Size:  fmt.Sprintf("%dx%d", pane.Width, pane.Height),
-				Href:  paneTargetHref(pane.PaneID),
+				Href:  paneTargetHref(pane.PaneID, defaultTerm),
 			})
 		}
 		_ = stateHTMLTemplate.Execute(w, struct {
@@ -154,15 +167,97 @@ func serveAPIContents(w http.ResponseWriter, r *http.Request, hub *wshub.Hub) {
 	_, _ = io.WriteString(w, content)
 }
 
-func redirectToFirstPane(w http.ResponseWriter, r *http.Request, hub *wshub.Hub) {
-	if href, ok := firstTargetPaneHref(hub); ok {
+type createPaneRequest struct {
+	Env map[string]string `json:"env"`
+	Cwd string            `json:"cwd"`
+	Cmd []string          `json:"cmd"`
+}
+
+func serveAPIPanes(w http.ResponseWriter, r *http.Request, hub *wshub.Hub, defaultTerm string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req createPaneRequest
+	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		if err != io.EOF {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+	} else if err := dec.Decode(&struct{}{}); err != io.EOF {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	if err := validateCreatePaneRequest(req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	pane, err := hub.CreatePane(wshub.CreatePaneOptions{
+		Env: req.Env,
+		Cwd: req.Cwd,
+		Cmd: req.Cmd,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Location", paneTargetHref(pane.PaneID, defaultTerm))
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(struct {
+		PaneID string `json:"pane_id"`
+	}{
+		PaneID: pane.PaneID,
+	})
+}
+
+func validateCreatePaneRequest(req createPaneRequest) error {
+	if req.Cwd != "" && strings.TrimSpace(req.Cwd) == "" {
+		return fmt.Errorf("cwd cannot be blank")
+	}
+	for key := range req.Env {
+		if !isValidEnvKey(key) {
+			return fmt.Errorf("invalid env key: %q", key)
+		}
+	}
+	return nil
+}
+
+func isValidEnvKey(v string) bool {
+	if v == "" {
+		return false
+	}
+	for i := 0; i < len(v); i++ {
+		ch := v[i]
+		isLetter := (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
+		isDigit := ch >= '0' && ch <= '9'
+		if i == 0 {
+			if !isLetter && ch != '_' {
+				return false
+			}
+			continue
+		}
+		if !isLetter && !isDigit && ch != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+func redirectToFirstPane(w http.ResponseWriter, r *http.Request, hub *wshub.Hub, defaultTerm string) {
+	if href, ok := firstTargetPaneHref(hub, defaultTerm); ok {
 		http.Redirect(w, r, href, http.StatusFound)
 		return
 	}
-	http.Redirect(w, r, "/api/state.html", http.StatusFound)
+	http.Redirect(w, r, statePageHref(defaultTerm), http.StatusFound)
 }
 
-func firstTargetPaneHref(hub *wshub.Hub) (string, bool) {
+func firstTargetPaneHref(hub *wshub.Hub, defaultTerm string) (string, bool) {
 	panes := hub.CurrentTargetSessionPaneInfos()
 	if len(panes) == 0 {
 		return "", false
@@ -173,7 +268,27 @@ func firstTargetPaneHref(hub *wshub.Hub) (string, bool) {
 			firstPane = pane
 		}
 	}
-	return paneTargetHref(firstPane.PaneID), true
+	return paneTargetHref(firstPane.PaneID, defaultTerm), true
+}
+
+func statePageHref(defaultTerm string) string {
+	v := url.Values{}
+	v.Set("term", normalizeDefaultTerm(defaultTerm))
+	return "/api/state.html?" + v.Encode()
+}
+
+func ensureTermQuery(r *http.Request, defaultTerm string) (string, bool) {
+	query := r.URL.Query()
+	current := strings.ToLower(strings.TrimSpace(query.Get("term")))
+	desired := normalizeDefaultTerm(current)
+	if current != "ghostty" && current != "xterm" {
+		desired = normalizeDefaultTerm(defaultTerm)
+	}
+	if current == desired {
+		return "", false
+	}
+	query.Set("term", desired)
+	return r.URL.Path + "?" + query.Encode(), true
 }
 
 func parsePanePathID(escapedPath, prefix string) (string, bool) {
@@ -342,8 +457,18 @@ func hexPreview(s string, maxBytes int) string {
 	return strings.Join(parts, " ")
 }
 
-func paneTargetHref(paneID string) string {
-	return fmt.Sprintf("/p/%s", paneID)
+func paneTargetHref(paneID, defaultTerm string) string {
+	v := url.Values{}
+	v.Set("term", normalizeDefaultTerm(defaultTerm))
+	return fmt.Sprintf("/p/%s?%s", paneID, v.Encode())
+}
+
+func normalizeDefaultTerm(raw string) string {
+	v := strings.ToLower(strings.TrimSpace(raw))
+	if v == "xterm" {
+		return "xterm"
+	}
+	return "ghostty"
 }
 
 func negotiateStateFormat(r *http.Request) string {

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,9 +14,9 @@ import (
 )
 
 func TestPaneTargetHrefUsesPaneIDPath(t *testing.T) {
-	got := paneTargetHref("13")
-	if got != "/p/13" {
-		t.Fatalf("paneTargetHref(13) = %q, want %q", got, "/p/13")
+	got := paneTargetHref("13", "ghostty")
+	if got != "/p/13?term=ghostty" {
+		t.Fatalf("paneTargetHref(13, ghostty) = %q, want %q", got, "/p/13?term=ghostty")
 	}
 }
 
@@ -42,8 +43,8 @@ func TestRootRedirectsToFirstPane(t *testing.T) {
 	if rec.Code != http.StatusFound {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	if got := rec.Header().Get("Location"); got != "/p/13" {
-		t.Fatalf("location = %q, want %q", got, "/p/13")
+	if got := rec.Header().Get("Location"); got != "/p/13?term=ghostty" {
+		t.Fatalf("location = %q, want %q", got, "/p/13?term=ghostty")
 	}
 }
 
@@ -62,8 +63,74 @@ func TestRootRedirectsToStatePageWhenNoPanesAvailable(t *testing.T) {
 	if rec.Code != http.StatusFound {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	if got := rec.Header().Get("Location"); got != "/api/state.html" {
-		t.Fatalf("location = %q, want %q", got, "/api/state.html")
+	if got := rec.Header().Get("Location"); got != "/api/state.html?term=ghostty" {
+		t.Fatalf("location = %q, want %q", got, "/api/state.html?term=ghostty")
+	}
+}
+
+func TestRootRedirectUsesConfiguredDefaultTerm(t *testing.T) {
+	hub := wshub.New(policy.Default(), "webui")
+	tmux := &scriptedTmuxSender{hub: hub}
+	if err := hub.BindTmux(tmux); err != nil {
+		t.Fatalf("BindTmux: %v", err)
+	}
+	if err := hub.RequestStateSync(); err != nil {
+		t.Fatalf("RequestStateSync: %v", err)
+	}
+	waitForTargetPaneID(t, hub, "13")
+
+	h, err := NewServer(Config{Hub: hub, DefaultTerm: "xterm"})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Location"); got != "/p/13?term=xterm" {
+		t.Fatalf("location = %q, want %q", got, "/p/13?term=xterm")
+	}
+}
+
+func TestPaneRouteAddsMissingTermQueryUsingDefault(t *testing.T) {
+	hub := wshub.New(policy.Default(), "webui")
+	h, err := NewServer(Config{Hub: hub, DefaultTerm: "xterm"})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/p/13", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Location"); got != "/p/13?term=xterm" {
+		t.Fatalf("location = %q, want %q", got, "/p/13?term=xterm")
+	}
+}
+
+func TestPaneRouteNormalizesInvalidTermQueryUsingDefault(t *testing.T) {
+	hub := wshub.New(policy.Default(), "webui")
+	h, err := NewServer(Config{Hub: hub, DefaultTerm: "xterm"})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/p/13?term=unknown&foo=1", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Location"); got != "/p/13?foo=1&term=xterm" {
+		t.Fatalf("location = %q, want %q", got, "/p/13?foo=1&term=xterm")
 	}
 }
 
@@ -195,6 +262,105 @@ func TestAPIStateReturnsStablePaneIDWithoutAbsolutePaneID(t *testing.T) {
 	}
 }
 
+func TestAPIPanesCreatesPaneWithOptions(t *testing.T) {
+	hub := wshub.New(policy.Default(), "webui")
+	tmux := &scriptedTmuxSender{hub: hub}
+	if err := hub.BindTmux(tmux); err != nil {
+		t.Fatalf("BindTmux: %v", err)
+	}
+	if err := hub.RequestStateSync(); err != nil {
+		t.Fatalf("RequestStateSync: %v", err)
+	}
+	waitForTargetPaneID(t, hub, "13")
+
+	h, err := NewServer(Config{Hub: hub})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	body := strings.NewReader(`{"env":{"FOO":"bar","ALPHA":"1"},"cwd":"/tmp/work dir","cmd":["bash","-lc","echo hi"]}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/panes", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Location"); got != "/p/14?term=ghostty" {
+		t.Fatalf("location = %q, want %q", got, "/p/14?term=ghostty")
+	}
+
+	var payload struct {
+		PaneID string `json:"pane_id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.PaneID != "14" {
+		t.Fatalf("pane_id = %q, want %q", payload.PaneID, "14")
+	}
+
+	line := tmux.LastCommandWithPrefix("split-window ")
+	if line == "" {
+		t.Fatalf("missing split-window command")
+	}
+	if !strings.Contains(line, "split-window -P -F '#{pane_id}' -t webui") {
+		t.Fatalf("unexpected split-window command: %q", line)
+	}
+	if !strings.Contains(line, "-c '/tmp/work dir'") {
+		t.Fatalf("split-window missing cwd: %q", line)
+	}
+	if !strings.Contains(line, "-e 'ALPHA=1' -e 'FOO=bar'") {
+		t.Fatalf("split-window missing env vars: %q", line)
+	}
+	if !strings.Contains(line, "'bash -lc '\\''echo hi'\\'''") {
+		t.Fatalf("split-window missing cmd argv: %q", line)
+	}
+}
+
+func TestAPIPanesRejectsInvalidEnvKey(t *testing.T) {
+	hub := wshub.New(policy.Default(), "webui")
+	tmux := &scriptedTmuxSender{hub: hub}
+	if err := hub.BindTmux(tmux); err != nil {
+		t.Fatalf("BindTmux: %v", err)
+	}
+
+	h, err := NewServer(Config{Hub: hub})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	body := strings.NewReader(`{"env":{"BAD-KEY":"v"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/panes", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if line := tmux.LastCommandWithPrefix("split-window "); line != "" {
+		t.Fatalf("unexpected split-window command: %q", line)
+	}
+}
+
+func TestAPIPanesRejectsNonPost(t *testing.T) {
+	hub := wshub.New(policy.Default(), "webui")
+	h, err := NewServer(Config{Hub: hub})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/panes", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestAPIDebugUnicodeCapturesLatestReport(t *testing.T) {
 	hub := wshub.New(policy.Default(), "webui")
 	tmux := &scriptedTmuxSender{hub: hub}
@@ -271,15 +437,28 @@ func waitForTargetPaneID(t *testing.T, hub *wshub.Hub, paneID string) {
 
 type scriptedTmuxSender struct {
 	hub *wshub.Hub
+	mu  sync.Mutex
+
+	lines []string
 }
 
 func (s *scriptedTmuxSender) Send(line string) error {
+	s.mu.Lock()
+	s.lines = append(s.lines, line)
+	s.mu.Unlock()
+
 	switch {
 	case strings.HasPrefix(line, "list-panes "):
 		go func() {
 			s.hub.BroadcastTmuxStdoutLine("%begin 1 1 0")
 			s.hub.BroadcastTmuxStdoutLine("__WMUX___pane\twebui\t%13\t@1\t0\t1\t0\t0\t120\t40\tbash\tbash")
 			s.hub.BroadcastTmuxStdoutLine("%end 1 1 0")
+		}()
+	case strings.HasPrefix(line, "split-window "):
+		go func() {
+			s.hub.BroadcastTmuxStdoutLine("%begin 5 5 0")
+			s.hub.BroadcastTmuxStdoutLine("%14")
+			s.hub.BroadcastTmuxStdoutLine("%end 5 5 0")
 		}()
 	case line == "capture-pane -p -N -t %13":
 		go func() {
@@ -300,4 +479,15 @@ func (s *scriptedTmuxSender) Send(line string) error {
 		}()
 	}
 	return nil
+}
+
+func (s *scriptedTmuxSender) LastCommandWithPrefix(prefix string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := len(s.lines) - 1; i >= 0; i-- {
+		if strings.HasPrefix(s.lines[i], prefix) {
+			return s.lines[i]
+		}
+	}
+	return ""
 }
