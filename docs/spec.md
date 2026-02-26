@@ -8,14 +8,15 @@ This document describes what the codebase currently implements.
 
 Current UI scope:
 
-- Single full-screen terminal per browser page (`ghostty` by default, `xterm` optional via `term` query param).
-- Page targets exactly one pane (from URL path `/p/<n>`).
+- Single full-screen terminal per browser page (`ghostty` by default, `xterm` optional via `term` query parameter).
+- Page targets exactly one pane (from URL path `/p/<pane_id>`).
 - Multiple web clients are supported concurrently.
 
 ## Terminology
 
 - **Target session**: the one tmux session `wmux` ensures at startup and attaches to.
-- **Pane number**: numeric pane index from tmux (`#{pane_index}`), used in URLs and HTTP API responses.
+- **tmux pane id**: tmux-native id with `%` prefix (for example `%13`).
+- **Public pane id**: tmux pane id without `%` (for example `13`), exposed by HTTP APIs.
 
 ## Configuration
 
@@ -54,57 +55,119 @@ Restart side effects:
 
 ## HTTP Endpoints
 
-- `GET /ws`: WebSocket endpoint.
-- `GET /`: static assets (embedded or `--static-dir`).
-- `GET /p` and `GET /p/*`: serve `index.html` for terminal route.
-- `GET /api/state`, `/api/state.json`: JSON pane list for the target session.
-- `GET /api/state.html`: simple HTML list of pane links.
-- `GET /api/contents/{pane}`: raw `text/plain` pane capture for a specific target-session pane number.
-  - Default (`?escapes` omitted or falsey): output from `capture-pane -p -t <pane-id>`.
-  - Escaped (`?escapes=1`, `true`, or `yes`): output from `capture-pane -p -e -t <pane-id>`.
+- `GET /ws`
+  - WebSocket endpoint.
+- `GET /`
+  - Hypermedia API document for the target session.
+  - Negotiated by `Accept`:
+    - default: `application/json`
+    - `text/html` if requested
+- `GET /api/state`, `/api/state.json`, `/api/state.html`
+  - Same hypermedia document shape as `/`, filtered to target-session panes.
+  - `.html` forces HTML representation.
+  - `.json` forces JSON representation.
+- `GET /api/panes/{pane_id}`
+  - Hypermedia document for a single pane.
+  - Returns `404` when pane id does not exist in target session.
+- `POST /api/panes`
+  - Creates a new pane in target session.
+  - Request body (`application/json`):
+    - `env` (optional object of string values)
+    - `cwd` (optional non-blank string)
+    - `cmd` (optional `[]string`)
+  - Validation:
+    - `cwd` cannot be only whitespace
+    - env keys must match `[A-Za-z_][A-Za-z0-9_]*`
+  - Response:
+    - `201 Created`
+    - `Location: /api/panes/{pane_id}`
+    - body is a pane hypermedia document (`resource: "wmux-pane"`)
+- `GET /api/contents/{pane_id}`
+  - Raw `text/plain` pane capture for a specific target-session pane id.
+  - `?escapes=1|true|yes` returns escape-decorated output.
+  - default (no escapes flag): plain capture.
+  - returns `404` for unknown pane.
+- `GET /api/debug/unicode`
+  - Returns latest captured unicode debug report.
+- `POST /api/debug/unicode`
+  - Stores a unicode debug report payload and augments it with server-side pane captures.
+- `GET /p` and `GET /p/{pane_id}`
+  - Serves terminal UI (`index.html`).
+  - Adds/normalizes `?term=` query (allowed: `ghostty`, `xterm`) via `302` redirect when missing/invalid.
+- Other static paths (`/index.html`, `/styles.css`, `/vendor/...`)
+  - Served from `--static-dir` or embedded assets.
 
-`/api/state*` responses are filtered to panes where `session_name == target-session`.
+## Hypermedia JSON Format
 
-`/api/state*` pane entries expose `pane` (number), not the absolute tmux pane id token.
+Collection-style resources (`/`, `/api/state*`) use:
 
-`/api/contents/{pane}` requires `pane` to exist in the target session and returns `404` otherwise.
+```json
+{
+  "resource": "wmux",
+  "default_term": "ghostty|xterm",
+  "links": [...],
+  "actions": [...],
+  "panes": [...]
+}
+```
 
-### Route Parameter Types and Matchers
+Pane-style resources (`/api/panes/{pane_id}`, `POST /api/panes`) use:
 
-The API should treat path parameters as typed values, not raw strings.
+```json
+{
+  "resource": "wmux-pane",
+  "default_term": "ghostty|xterm",
+  "links": [...],
+  "actions": [...],
+  "panes": [ { ...single pane... } ]
+}
+```
 
-Current parameter types:
+Link behavior:
 
-- `PaneNumber`
-  - Used by: `/p/{pane}` and `/api/contents/{pane}`
-  - Canonical form: non-negative base-10 integer (examples: `0`, `1`, `12`).
-  - Matcher (decoded token): `^[0-9]+$`
-  - Accepted URL path forms:
-    - raw token in path segment: `0`
+- Supports URI templates for follow-up requests:
+  - `/p/{pane_id}{?term}`
+  - `/api/panes/{pane_id}`
+  - `/api/contents/{pane_id}{?escapes}`
+- Templated links include concrete examples (`example`) in JSON representation.
 
-Validation and normalization rules for `PaneNumber`:
+Action behavior:
 
-- Reject empty values.
-- Reject values containing `/` after decoding.
-- Parse as integer and reject negative values.
-- Validate normalized value against `^[0-9]+$`.
+- `create-pane` action is always present and includes:
+  - field descriptions (`env`, `cwd`, `cmd`)
+  - machine-readable JSON Schema (`actions[].schema`, draft 2020-12)
 
-### `net/http` Integration (flag-inspired)
+Per-pane links in `panes[].links`:
 
-Because `net/http` does not provide typed path params directly, route handlers should use a small adapter that is conceptually similar to `flag.Value`:
+- `self` -> `/api/panes/{pane_id}`
+- `terminal` -> `/p/{pane_id}?term=<default>`
+- `contents` -> `/api/contents/{pane_id}`
+- `contents-escaped` -> `/api/contents/{pane_id}?escapes=1`
 
-- Define a parser interface for path params:
-  - `Set(string) error` for parsing + validation
-  - `String() string` for canonical serialization
-- Each parameter type (currently `PaneNumber`) implements this interface.
-- Handler flow:
-  1. Extract raw segment from request path.
-  2. Decode URL escaping once.
-  3. Call `Set(raw)` on the typed parameter.
-  4. Use typed value in handler logic.
-  5. Return `404` for route mismatch (missing/invalid segment shape), `400` for syntactically invalid parameter where route matched but value is invalid.
+## Hypermedia HTML Format
 
-This keeps parsing logic centralized, testable, and consistent with how `flag` delegates parsing to typed values.
+The HTML representation for `/` and `/api/state.html` renders:
+
+- link list (templated links shown as code + concrete example links)
+- action list
+- an interactive Create Pane form (`id="create-pane-form"`)
+- per-pane links and metadata
+
+Create Pane form behavior:
+
+- Collects `cwd`, `env` JSON object, and `cmd` JSON string-array fields.
+- Submits JSON via `fetch` to `POST /api/panes`.
+- Renders response/error text in `#create-pane-result`.
+
+## Path Parameter Rules
+
+`pane_id` parsing for `/api/contents/{pane_id}` and `/api/panes/{pane_id}`:
+
+- segment must exist and be exactly one path segment
+- trimmed value must be non-empty
+- must not start with `%`
+
+Public pane id is treated as opaque by HTTP handlers (not parsed as integer).
 
 ## WebSocket Protocol
 
@@ -151,7 +214,7 @@ Server enforces a strict allowlist. Any other command is blocked.
 Allowed commands:
 
 - `send-keys`
-- `resize-pane`
+- `refresh-client`
 - `kill-window`
 - `list-windows`
 - `list-panes`
@@ -177,24 +240,24 @@ Client behavior:
 ## Browser UI Behavior
 
 - `index.html` renders one terminal host, no tab bar and no pane grid.
-- Route token is read from `/p/<n>` where `n` is a non-negative integer.
-- Pane resolution is by exact pane number (`pane_index`).
+- Route token is read from `/p/<pane_id>`.
+- Pane resolution is by exact public pane id.
 - If no pane matches, UI logs a warning and does not attach terminal input/output.
 
 Terminal behavior:
 
-- xterm.js with fit addon and scrollback 10000.
+- Preferred renderer is ghostty-web with xterm fallback.
 - On pane change:
   - Reset terminal.
-  - Request `capture-pane -p -e -t <pane>` for snapshot.
-  - Request `display-message -p -t <pane> "__WMUX_CURSOR\t#{pane_cursor_x}\t#{pane_cursor_y}"`.
+  - Request `capture-pane -p -e -N -t <tmux-pane-id>` for snapshot.
+  - Request `display-message -p -t <tmux-pane-id> "__WMUX_CURSOR\t#{pane_cursor_x}\t#{pane_cursor_y}"`.
 - `pane_snapshot` seeds terminal content.
 - `pane_cursor` moves cursor with ANSI `CSI row;col H`.
 - `pane_output` appends live data for current pane only.
 
 Input and resize:
 
-- xterm `onData` is translated to `send-keys` commands, typically one character at a time.
+- Terminal input is translated to `send-keys` commands, usually character-by-character.
 - Special mappings:
   - `ESC` -> `Escape`
   - `CR/LF` -> `Enter`
@@ -203,12 +266,12 @@ Input and resize:
   - `DEL` -> `BSpace`
 - Other characters use `send-keys -l <char>`.
 - Window resize triggers `fit()` and then:
-  - `resize-pane -t <pane> -x <cols> -y <rows>`
+  - `refresh-client -C <cols>x<rows>`
 
 ## Multi-Client Semantics (Current)
 
 - Multiple browser clients may connect simultaneously.
-- Each browser page is independently bound to the pane number in its own URL.
+- Each browser page is independently bound to the pane id in its own URL.
 - There is no server-side per-client focus model; pane targeting is explicit in each command from the client.
 
 ## Security Model
