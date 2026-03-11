@@ -9,8 +9,13 @@ import (
 const modelPrefix = "__WMUX__"
 
 type statePayload struct {
-	Windows []windowPayload `json:"windows"`
-	Panes   []panePayload   `json:"panes"`
+	Windows     []windowPayload       `json:"windows"`
+	Panes       []panePayload         `json:"panes"`
+	Unavailable *tmuxUnavailableState `json:"unavailable,omitempty"`
+}
+
+type tmuxUnavailableState struct {
+	Reason string `json:"reason"`
 }
 
 type windowPayload struct {
@@ -24,6 +29,8 @@ type panePayload struct {
 	Name        string `json:"name"`
 	SessionName string `json:"session_name"`
 	WindowID    string `json:"window_id"`
+	WindowIndex int    `json:"window_index"`
+	WindowName  string `json:"window_name"`
 	PaneIndex   int    `json:"pane_index"`
 	Active      bool   `json:"active"`
 	Left        int    `json:"left"`
@@ -52,6 +59,11 @@ func (m *modelState) reset() {
 
 func (m *modelState) applyOutputLines(lines []string) bool {
 	updated := false
+	nextWindows := make(map[string]windowPayload)
+	nextPanes := make(map[string]panePayload)
+	sawWindows := false
+	sawPanes := false
+
 	for _, line := range lines {
 		if !strings.HasPrefix(line, modelPrefix) {
 			continue
@@ -67,11 +79,8 @@ func (m *modelState) applyOutputLines(lines []string) bool {
 			if err != nil {
 				continue
 			}
-			next := windowPayload{ID: parts[1], Index: idx, Name: parts[3]}
-			if cur, ok := m.windows[next.ID]; !ok || cur != next {
-				m.windows[next.ID] = next
-				updated = true
-			}
+			nextWindows[parts[1]] = windowPayload{ID: parts[1], Index: idx, Name: parts[3]}
+			sawWindows = true
 		case "pane":
 			if len(parts) < 10 {
 				continue
@@ -80,13 +89,65 @@ func (m *modelState) applyOutputLines(lines []string) bool {
 			if !ok {
 				continue
 			}
-			if cur, ok := m.panes[pane.ID]; !ok || cur != pane {
-				m.panes[pane.ID] = pane
-				updated = true
-			}
+			nextPanes[pane.ID] = pane
+			sawPanes = true
 		}
 	}
+
+	if sawPanes {
+		if !paneMapsEqual(m.panes, nextPanes) {
+			m.panes = nextPanes
+			updated = true
+		}
+		if !sawWindows {
+			nextWindows = windowsFromPanes(nextPanes)
+			sawWindows = true
+		}
+	}
+
+	if sawWindows {
+		if !windowMapsEqual(m.windows, nextWindows) {
+			m.windows = nextWindows
+			updated = true
+		}
+	}
+
 	return updated
+}
+
+func paneMapsEqual(a, b map[string]panePayload) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, av := range a {
+		if bv, ok := b[k]; !ok || av != bv {
+			return false
+		}
+	}
+	return true
+}
+
+func windowMapsEqual(a, b map[string]windowPayload) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, av := range a {
+		if bv, ok := b[k]; !ok || av != bv {
+			return false
+		}
+	}
+	return true
+}
+
+func windowsFromPanes(panes map[string]panePayload) map[string]windowPayload {
+	windows := make(map[string]windowPayload)
+	for _, pane := range panes {
+		if pane.WindowID == "" {
+			continue
+		}
+		windows[pane.WindowID] = windowPayload{ID: pane.WindowID, Index: pane.WindowIndex, Name: pane.WindowName}
+	}
+	return windows
 }
 
 func (m *modelState) snapshot() statePayload {
@@ -106,6 +167,9 @@ func (m *modelState) snapshot() statePayload {
 		panes = append(panes, p)
 	}
 	sort.Slice(panes, func(i, j int) bool {
+		if panes[i].WindowIndex != panes[j].WindowIndex {
+			return panes[i].WindowIndex < panes[j].WindowIndex
+		}
 		if panes[i].WindowID != panes[j].WindowID {
 			return panes[i].WindowID < panes[j].WindowID
 		}
@@ -152,12 +216,24 @@ func parsePane(parts []string) (panePayload, bool) {
 	if len(parts) > 10+offset {
 		title = parts[10+offset]
 	}
+	windowIndex := 0
+	if len(parts) > 11+offset {
+		if idx, err := strconv.Atoi(parts[11+offset]); err == nil {
+			windowIndex = idx
+		}
+	}
+	windowName := ""
+	if len(parts) > 12+offset {
+		windowName = parts[12+offset]
+	}
 
 	return panePayload{
 		ID:          parts[1+offset],
 		Name:        name,
 		SessionName: sessionName,
 		WindowID:    parts[2+offset],
+		WindowIndex: windowIndex,
+		WindowName:  windowName,
 		PaneIndex:   paneIndex,
 		Active:      parts[4+offset] == "1",
 		Left:        left,

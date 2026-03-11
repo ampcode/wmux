@@ -50,15 +50,31 @@ Use a custom tmux binary path:
 go run ./cmd/wmux --tmux-bin /opt/homebrew/bin/tmux
 ```
 
+Attach wmux to an existing tmux server/socket (for example Overmind):
+
+```bash
+go run ./cmd/wmux --target-session dev --tmux-socket-name overmind
+```
+
+Or via explicit socket path:
+
+```bash
+go run ./cmd/wmux --target-session dev --tmux-socket-path /tmp/overmind.sock
+```
+
 ## Flags
 
 - `--listen` (default `127.0.0.1:8080`)
 - `--target-session` (default `webui`; the only tmux session wmux manages and serves)
 - `--static-dir` (optional override for web assets)
 - `--tmux-bin` (default `tmux`)
+- `--tmux-socket-name` (optional; maps to `tmux -L <name>`)
+- `--tmux-socket-path` (optional; maps to `tmux -S <path>`)
 - `--term` (default `ghostty`; accepted values: `ghostty`, `xterm`)
 - `--restart-backoff` (default `500ms`)
 - `--restart-max-backoff` (default `10s`)
+
+`--tmux-socket-name` and `--tmux-socket-path` are mutually exclusive.
 
 ## Environment Variables
 
@@ -68,6 +84,8 @@ Every flag can be provided by env var:
 - `WMUX_TARGET_SESSION`
 - `WMUX_STATIC_DIR`
 - `WMUX_TMUX_BIN`
+- `WMUX_TMUX_SOCKET_NAME`
+- `WMUX_TMUX_SOCKET_PATH`
 - `WMUX_TERM`
 - `WMUX_RESTART_BACKOFF`
 - `WMUX_RESTART_MAX_BACKOFF`
@@ -80,8 +98,10 @@ WMUX_TARGET_SESSION=dev WMUX_LISTEN=127.0.0.1:9090 go run ./cmd/wmux
 
 ## Notes
 
-- `wmux` ensures the configured `target-session` exists at startup.
+- In default socket mode, `wmux` ensures the configured `target-session` exists (same behavior as before).
+- When `--tmux-socket-name` or `--tmux-socket-path` is set, `wmux` attaches to that tmux server and serves the existing target session without auto-creating it.
 - `wmux` always runs on top of exactly one tmux session.
+- If the target socket/session is unavailable, `wmux` keeps running and reports `unavailable` in `/api/state.json` until tmux becomes reachable again.
 - Static web assets are embedded by default; `--static-dir` is only needed if you want to serve local asset files.
 
 ## Development

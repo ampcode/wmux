@@ -24,12 +24,14 @@ type TmuxSender interface {
 }
 
 type Hub struct {
-	policy        policy.Policy
-	tmux          TmuxSender
-	parser        *tmuxparse.StreamParser
-	model         modelState
-	pending       []pendingCommand
-	targetSession string
+	policy                policy.Policy
+	tmux                  TmuxSender
+	parser                *tmuxparse.StreamParser
+	model                 modelState
+	pending               []pendingCommand
+	targetSession         string
+	unavailableReason     string
+	stateRefreshScheduled bool
 
 	mu      sync.RWMutex
 	clients map[*client]struct{}
@@ -42,6 +44,8 @@ type PaneInfo struct {
 	PaneIndex   int    `json:"pane_index"`
 	Name        string `json:"name"`
 	SessionName string `json:"session_name"`
+	WindowIndex int    `json:"window_index"`
+	WindowName  string `json:"window_name"`
 	Width       int    `json:"width"`
 	Height      int    `json:"height"`
 	TmuxPaneID  string `json:"-"`
@@ -124,14 +128,17 @@ var upgrader = websocket.Upgrader{
 
 var safeBareToken = regexp.MustCompile(`^[A-Za-z0-9_@%:./+\-]+$`)
 
+const paneModelFormat = "__WMUX___pane\t#{session_name}\t#{pane_id}\t#{window_id}\t#{pane_index}\t#{pane_active}\t#{pane_left}\t#{pane_top}\t#{pane_width}\t#{pane_height}\t#{pane_current_command}\t#{pane_title}\t#{window_index}\t#{window_name}"
+
 func New(p policy.Policy, targetSession string) *Hub {
 	h := &Hub{
-		policy:          p,
-		clients:         map[*client]struct{}{},
-		model:           newModelState(),
-		pending:         []pendingCommand{},
-		targetSession:   targetSession,
-		outputUTF8Carry: map[string][]byte{},
+		policy:            p,
+		clients:           map[*client]struct{}{},
+		model:             newModelState(),
+		pending:           []pendingCommand{},
+		targetSession:     targetSession,
+		unavailableReason: "waiting for tmux target",
+		outputUTF8Carry:   map[string][]byte{},
 	}
 	h.resetParser()
 	return h
@@ -143,7 +150,7 @@ func (h *Hub) BindTmux(tmux TmuxSender) error {
 }
 
 func (h *Hub) RequestStateSync() error {
-	argv := []string{"list-panes", "-a", "-F", "__WMUX___pane\t#{session_name}\t#{pane_id}\t#{window_id}\t#{pane_index}\t#{pane_active}\t#{pane_left}\t#{pane_top}\t#{pane_width}\t#{pane_height}\t#{pane_current_command}\t#{pane_title}"}
+	argv := []string{"list-panes", "-a", "-F", paneModelFormat}
 	line, err := encodeArgvCommand(argv)
 	if err != nil {
 		return err
@@ -167,10 +174,26 @@ func (h *Hub) RequestStateSyncWithRetry() {
 	}
 }
 
+func (h *Hub) RefreshState(timeout time.Duration) error {
+	argv := []string{"list-panes", "-a", "-F", paneModelFormat}
+	res, err := h.runCommandAndWait(argv, timeout, false)
+	if err != nil {
+		return err
+	}
+	if !res.Success {
+		return fmt.Errorf("list-panes failed")
+	}
+	return nil
+}
+
 func (h *Hub) CurrentState() statePayload {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	return filterStateToTargetSession(h.model.snapshot(), h.targetSession)
+	state := filterStateToTargetSession(h.model.snapshot(), h.targetSession)
+	if h.unavailableReason != "" {
+		state.Unavailable = &tmuxUnavailableState{Reason: h.unavailableReason}
+	}
+	return state
 }
 
 func (h *Hub) CurrentTargetSessionPanes() []panePayload {
@@ -199,7 +222,7 @@ func filterStateToTargetSession(state statePayload, targetSession string) stateP
 		}
 	}
 
-	return statePayload{Windows: filteredWindows, Panes: filteredPanes}
+	return statePayload{Windows: filteredWindows, Panes: filteredPanes, Unavailable: state.Unavailable}
 }
 
 func (h *Hub) CurrentTargetSessionPaneInfos() []PaneInfo {
@@ -212,11 +235,19 @@ func (h *Hub) CurrentTargetSessionPaneInfos() []PaneInfo {
 			TmuxPaneID:  pane.ID,
 			Name:        pane.Name,
 			SessionName: pane.SessionName,
+			WindowIndex: pane.WindowIndex,
+			WindowName:  pane.WindowName,
 			Width:       pane.Width,
 			Height:      pane.Height,
 		})
 	}
 	return out
+}
+
+func (h *Hub) CurrentUnavailableReason() string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.unavailableReason
 }
 
 func (h *Hub) TargetSessionPaneIDByPublicID(paneID string) (string, bool) {
@@ -338,16 +369,50 @@ func (h *Hub) BroadcastTmuxStderrLine(line string) {
 	h.broadcast(serverMsg{T: "error", Message: "tmux stderr: " + line})
 }
 
-func (h *Hub) BroadcastRestart() {
+func (h *Hub) BroadcastConnected() {
+	h.resetParser()
+	h.mu.Lock()
+	h.stateRefreshScheduled = false
+	hadUnavailable := h.unavailableReason != ""
+	h.unavailableReason = ""
+	snapshot := filterStateToTargetSession(h.model.snapshot(), h.targetSession)
+	h.mu.Unlock()
+
+	if hadUnavailable {
+		h.broadcast(serverMsg{T: "tmux_state", State: &snapshot})
+	}
+	go h.RequestStateSyncWithRetry()
+}
+
+func (h *Hub) BroadcastDisconnected(err error) {
+	reason := unavailableReason(err)
 	h.resetParser()
 	h.mu.Lock()
 	h.model.reset()
 	h.pending = h.pending[:0]
-	snapshot := h.model.snapshot()
+	h.stateRefreshScheduled = false
+	h.unavailableReason = reason
+	snapshot := filterStateToTargetSession(h.model.snapshot(), h.targetSession)
+	if reason != "" {
+		snapshot.Unavailable = &tmuxUnavailableState{Reason: reason}
+	}
 	h.mu.Unlock()
+	if reason != "" {
+		h.broadcast(serverMsg{T: "error", Message: reason})
+	}
 	h.broadcast(serverMsg{T: "tmux_state", State: &snapshot})
 	h.broadcast(serverMsg{T: "tmux_restarted"})
-	go h.RequestStateSyncWithRetry()
+}
+
+func unavailableReason(err error) string {
+	if err == nil {
+		return "tmux target unavailable"
+	}
+	msg := strings.TrimSpace(err.Error())
+	if msg == "" {
+		return "tmux target unavailable"
+	}
+	return msg
 }
 
 func (h *Hub) resetParser() {
@@ -374,6 +439,7 @@ func (h *Hub) consumeParserEvents(parser *tmuxparse.StreamParser) {
 				default:
 				}
 			}
+
 			var state *statePayload
 			h.mu.Lock()
 			if h.model.applyOutputLines(e.Output) {
@@ -404,6 +470,7 @@ func (h *Hub) consumeParserEvents(parser *tmuxparse.StreamParser) {
 					h.broadcast(serverMsg{T: "pane_cursor", PaneCursor: cursor})
 				}
 			}
+
 		case tmuxparse.Notification:
 			if (e.Name == "output" || e.Name == "extended-output") && len(e.Args) >= 1 {
 				decoded := h.decodePaneOutputData(e.Args[0], e.Value)
@@ -416,16 +483,47 @@ func (h *Hub) consumeParserEvents(parser *tmuxparse.StreamParser) {
 				}})
 				continue
 			}
+
 			h.broadcast(serverMsg{T: "tmux_notification", Notification: &notificationPayload{
 				Name:  e.Name,
 				Args:  append([]string(nil), e.Args...),
 				Text:  e.Text,
 				Value: e.Value,
 			}})
+			if notificationRequiresModelRefresh(e.Name) {
+				h.scheduleStateRefresh()
+			}
+
 		case tmuxparse.ParseError:
 			h.broadcast(serverMsg{T: "error", Message: "tmux parse error: " + e.Error()})
 		}
 	}
+}
+
+func notificationRequiresModelRefresh(name string) bool {
+	if name == "layout-change" || name == "sessions-changed" || name == "session-changed" || name == "client-session-changed" {
+		return true
+	}
+	return strings.HasPrefix(name, "window-") || strings.HasPrefix(name, "pane-")
+}
+
+func (h *Hub) scheduleStateRefresh() {
+	h.mu.Lock()
+	if h.stateRefreshScheduled {
+		h.mu.Unlock()
+		return
+	}
+	h.stateRefreshScheduled = true
+	h.mu.Unlock()
+
+	time.AfterFunc(120*time.Millisecond, func() {
+		h.mu.Lock()
+		h.stateRefreshScheduled = false
+		h.mu.Unlock()
+		if err := h.RequestStateSync(); err != nil {
+			log.Printf("wmux: state refresh failed: %v", err)
+		}
+	})
 }
 
 func (h *Hub) decodePaneOutputData(paneID, value string) string {

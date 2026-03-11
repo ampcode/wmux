@@ -98,12 +98,14 @@ func serveIndex(w http.ResponseWriter, _ *http.Request, staticDir string) {
 }
 
 func serveAPIRoot(w http.ResponseWriter, r *http.Request, hub *wshub.Hub, defaultTerm string) {
-	doc := buildHypermediaDocument("/", hub.CurrentTargetSessionPaneInfos(), defaultTerm)
+	_ = hub.RefreshState(750 * time.Millisecond)
+	doc := buildHypermediaDocument("/", hub.CurrentTargetSessionPaneInfos(), hub.CurrentUnavailableReason(), defaultTerm)
 	serveHypermediaDocument(w, r, doc)
 }
 
 func serveAPIState(w http.ResponseWriter, r *http.Request, hub *wshub.Hub, defaultTerm string) {
-	doc := buildHypermediaDocument(r.URL.Path, hub.CurrentTargetSessionPaneInfos(), defaultTerm)
+	_ = hub.RefreshState(750 * time.Millisecond)
+	doc := buildHypermediaDocument(r.URL.Path, hub.CurrentTargetSessionPaneInfos(), hub.CurrentUnavailableReason(), defaultTerm)
 	serveHypermediaDocument(w, r, doc)
 }
 
@@ -139,17 +141,24 @@ type paneDocument struct {
 	PaneIndex   int              `json:"pane_index"`
 	Name        string           `json:"name"`
 	SessionName string           `json:"session_name"`
+	WindowIndex int              `json:"window_index"`
+	WindowName  string           `json:"window_name"`
 	Width       int              `json:"width"`
 	Height      int              `json:"height"`
 	Links       []hypermediaLink `json:"links,omitempty"`
 }
 
+type unavailableDocument struct {
+	Reason string `json:"reason"`
+}
+
 type hypermediaDocument struct {
-	Resource    string             `json:"resource"`
-	DefaultTerm string             `json:"default_term"`
-	Links       []hypermediaLink   `json:"links"`
-	Actions     []hypermediaAction `json:"actions,omitempty"`
-	Panes       []paneDocument     `json:"panes"`
+	Resource    string               `json:"resource"`
+	DefaultTerm string               `json:"default_term"`
+	Links       []hypermediaLink     `json:"links"`
+	Actions     []hypermediaAction   `json:"actions,omitempty"`
+	Panes       []paneDocument       `json:"panes"`
+	Unavailable *unavailableDocument `json:"unavailable,omitempty"`
 }
 
 func serveHypermediaDocument(w http.ResponseWriter, r *http.Request, doc hypermediaDocument) {
@@ -170,7 +179,7 @@ func serveHypermediaDocument(w http.ResponseWriter, r *http.Request, doc hyperme
 	_ = json.NewEncoder(w).Encode(doc)
 }
 
-func buildHypermediaDocument(selfPath string, panes []wshub.PaneInfo, defaultTerm string) hypermediaDocument {
+func buildHypermediaDocument(selfPath string, panes []wshub.PaneInfo, unavailableReason string, defaultTerm string) hypermediaDocument {
 	examplePaneID := "0"
 	if len(panes) > 0 {
 		examplePaneID = panes[0].PaneID
@@ -195,6 +204,9 @@ func buildHypermediaDocument(selfPath string, panes []wshub.PaneInfo, defaultTer
 	}
 	for _, pane := range panes {
 		doc.Panes = append(doc.Panes, paneResource(pane, defaultTerm))
+	}
+	if strings.TrimSpace(unavailableReason) != "" {
+		doc.Unavailable = &unavailableDocument{Reason: strings.TrimSpace(unavailableReason)}
 	}
 	return doc
 }
@@ -240,6 +252,8 @@ func paneResource(pane wshub.PaneInfo, defaultTerm string) paneDocument {
 		PaneIndex:   pane.PaneIndex,
 		Name:        pane.Name,
 		SessionName: pane.SessionName,
+		WindowIndex: pane.WindowIndex,
+		WindowName:  pane.WindowName,
 		Width:       pane.Width,
 		Height:      pane.Height,
 		Links: []hypermediaLink{
@@ -655,6 +669,7 @@ var stateHTMLTemplate = template.Must(template.New("state").Parse(`<!doctype htm
 <body>
   <h1>wmux API</h1>
   <p>Default terminal renderer: <code>{{.Doc.DefaultTerm}}</code></p>
+  {{if .Doc.Unavailable}}<p><strong>tmux unavailable:</strong> <code>{{.Doc.Unavailable.Reason}}</code></p>{{end}}
 
   <section>
     <h2>Links</h2>

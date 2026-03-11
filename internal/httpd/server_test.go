@@ -355,6 +355,12 @@ func TestAPIStateReturnsStablePaneIDWithoutAbsolutePaneID(t *testing.T) {
 	if got, ok := payload.Panes[0]["pane_id"]; !ok || got != "13" {
 		t.Fatalf("stable pane id missing or unexpected: %v", payload.Panes[0])
 	}
+	if got, ok := payload.Panes[0]["window_name"]; !ok || got != "main" {
+		t.Fatalf("window_name missing or unexpected: %v", payload.Panes[0])
+	}
+	if got, ok := payload.Panes[0]["window_index"]; !ok || got != float64(0) {
+		t.Fatalf("window_index missing or unexpected: %v", payload.Panes[0])
+	}
 	if _, ok := payload.Panes[0]["id"]; ok {
 		t.Fatalf("unexpected absolute pane id field present: %v", payload.Panes[0])
 	}
@@ -675,7 +681,7 @@ func (s *scriptedTmuxSender) Send(line string) error {
 	case strings.HasPrefix(line, "list-panes "):
 		go func() {
 			s.hub.BroadcastTmuxStdoutLine("%begin 1 1 0")
-			s.hub.BroadcastTmuxStdoutLine("__WMUX___pane\twebui\t%13\t@1\t0\t1\t0\t0\t120\t40\tbash\tbash")
+			s.hub.BroadcastTmuxStdoutLine("__WMUX___pane\twebui\t%13\t@1\t0\t1\t0\t0\t120\t40\tbash\tbash\t0\tmain")
 			s.hub.BroadcastTmuxStdoutLine("%end 1 1 0")
 		}()
 	case strings.HasPrefix(line, "split-window "):
